@@ -1,0 +1,673 @@
+---
+title: "Diversity and team-performance meta-analysis"
+description: null
+output:
+  html_document:
+    theme: united
+    toc: yes
+  html_notebook: default
+  pdf_document:
+    fig_height: 6
+    fig_width: 8
+  word_document: default
+Author: Lukas Wallrich 
+---
+
+```{r setup, include=FALSE}
+#
+if (!require(groundhog)) install.packages('groundhog')
+groundhog::groundhog.library(c("readxl", "TOSTER", "metafor", "tidyverse", "clubSandwich", "cli", "rsprite2", "esc",
+                               "mice", "metacart", "gt"), date = "2023-07-09")
+
+groundhog::groundhog.library(c("lukaswallrich/timesaveR"), date = "2023-07-09")
+
+source("helpers/helpers.R")
+
+```
+
+*Credits:* This code builds on the [RMarkdown template for Correlational studies meta-analysis in Psychology](https://osf.io/f85uy/), developed by Adrien Fillon and Gilad Feldman. 
+
+```{r intro, include=FALSE}
+effect_sizes_en <- read_excel("data/english_coding-WIP.xlsx", 
+                              sheet = "Unified Coding", 
+                              skip = 2, na = c("#N/A", "NA")) %>% filter(!is.na(ID))
+
+#effect_sizes_other <- read_excel("data/english_coding-WIP.xlsx")
+
+# Assumed correlation between dependent effect sizes
+rho <- 0.6
+```
+
+
+
+```{r importfile, include=FALSE}
+# Rename variables
+rename_vec_en <- c(
+  NULL = "double coded",
+  id = "ID",
+  effect_id = "effect_id",
+  #excl = "Excluded",
+  NULL = "Title",
+  author_year = "Author (Year)",
+  file = "File",
+  year = "Year",
+  NULL = "Coder",
+  NULL = "Status",
+  NULL = "Date coded",
+  study = "Study",
+  sample = "Sample",
+  art_focus = "Article focus",
+  pub_status = "Publication status",
+  nonlin_rel = "Non-linear relationship",
+  gen_notes =  "General Notes",
+  design = "Design",
+  setting = "Setting",
+  ind_sector = "Industry/sector",
+  teams_function = "Function",
+  country = "Country",
+  n_teams = "N teams",
+  n_resp = "N obs",
+  stud_sample = "Student sample",
+  tmt = "TMT",
+  year_coll = "Year collected (if reported)",
+  domain = "Domain",
+  sub_dom = "Sub-domain",
+  div_specific = "Specify",
+  meas_type = "Measure type",
+  items_div = "Items...31",
+  opts_div = "Options...32",
+  m_div = "M...33",
+  sd_div = "SD...34",
+  reliab_div = "Reliability Cronbach's alpha (or note)...35",
+  notes_div = "Notes...36",
+  name_perf = "Name",
+  criterion = "Criterion",
+  rater = "Rater",
+  items_perf = "Items...40",
+  opts_perf = "Options...41",
+  m_perf = "M...42",
+  sd_perf = "SD...43",
+  reliab_perf = "Reliability Cronbach's alpha (or note)...44",
+  notes_perf = "Notes...45",
+  r = "r",
+  d = "d",
+  other = "other",
+  stats_notes = "Statistics Notes",
+  interdep = "Interdependence",
+  complexity = "Complexity",
+  longevity = "Longevity",
+  virtuality = "Virtuality",
+  auth_diff = "Authority differentiation",
+  div_climate = "Diversity climate",
+  psych_safe = "Psych safety"
+)
+
+names(effect_sizes_en) <- names(effect_sizes_en) %>% str_replace("\n", " ") %>% str_squish()
+effect_sizes_en <- effect_sizes_en %>% select(rename_vec_en[!names(rename_vec_en)=="NULL"])
+
+dataset <- effect_sizes_en %>%
+  mutate(articlestudy = paste(id, study, sample, sep = "/")) %>%
+  group_by(articlestudy) %>%
+  mutate(effect_id = row_number()) %>%
+  ungroup()  %>% 
+  # Disambiguate author_year
+  group_by(author_year)  %>% 
+  mutate(id_rank = match(id, unique(id))) %>%
+  mutate(author_year = ifelse(n() > 1, 
+                               paste0(author_year, letters[id_rank]), 
+                               author_year)) %>%
+  ungroup() %>%
+  select(-id_rank)
+
+# Check data types
+
+dataset <- dataset %>% mutate(n_teams = as.numeric(n_teams), domain = as.factor(domain))
+
+```
+
+## Estimate 'corrected' correlations and standard errors
+
+```{r}
+
+# Calculate r from other measures
+# Formulae taken from Polanin & Snilsveit (Campbell SR, DOI: 10.4073/cmpn.2016.3)
+
+d_to_r <- function(d, n1 = NULL, n2 = NULL, n = NULL) {
+  # If only n is provided, equal group sizes are assumed (done throughout this MA)
+  if (is.null(n1) && is.null(n2)) {n1 = n/2; n2 = n/2}
+  a <- (n1 + n2)^2 / (n1 * n2)
+  r <- d / sqrt(d^2 + a)
+  return(r)
+}
+
+OR_to_r <- function(OR, n1 = NULL, n2 = NULL, n = NULL) {
+  # If only n is provided, equal group sizes are assumed (done throughout this MA)
+  if (is.null(n1) && is.null(n2)) {n1 = n/2; n2 = n/2}
+  a <- (n1 + n2)^2 / (n1 * n2)
+  r <- (log(OR) * (sqrt(3)/pi)) / sqrt((log(OR) * (sqrt(3)/pi)) + a)
+  return(r)
+}
+
+calculate_es <- function(row) {
+  if (!is.na(row$r)) return(row$r %>% as.numeric())
+  if (!is.na(row$d)) return(d_to_r(row$d %>% as.numeric(), n = row$n_teams))
+  if (!is.na(row$other)) {
+    if (str_detect(row$other, "OR")) {
+      return(OR_to_r(str_extract(row$other, "\\d.*$") %>% as.numeric(), n = row$n_teams))
+    } else {
+      message("Challenge in ", row$id, " row: ", row$effect_id)
+      return(NA)
+      # TK - to be used for esc_B in particular
+      # How to assign and return result
+      eval(parse(text = row$other))
+    }
+  }
+}
+
+dataset <- dataset %>% rowwise() %>% 
+  mutate(r_rep = calculate_es(pick(everything()))) %>% 
+  ungroup()
+
+
+# Transform special reliabilities
+# For 2-item scale, Cronbachs alpha is (2 * r) / (1 + r), so that can be directly converted
+# Expect 'NAs introduced by coercion' warnings from case_when (https://github.com/tidyverse/dplyr/issues/6250)
+
+dataset <- dataset %>%
+  mutate(
+    across(
+      .cols = c(reliab_div, reliab_perf),
+      .fns = list(
+        type = ~case_when(
+          is.na(.) ~ NA_character_,
+          str_detect(., "^[0-9.]+$") ~ "cronbach",
+          str_detect(., "CR") ~ "comp_reliab_other",
+          str_detect(., "r =") ~ "r",
+          str_detect(., "ICC|interrater|IRR") ~ "ICC_interrater",
+          str_detect(., "[0-9]") ~ "other",
+          TRUE ~ "other"
+        ),
+        conv = ~case_when(
+          str_detect(., "^[0-9.]+$") ~ as.numeric(.),
+          str_detect(., "CR") ~ as.numeric(str_extract(., "[0-9.]+")),
+          str_detect(., "r =") ~ {
+            r_value <- as.numeric(str_extract(., "(?<=r = ?)[0-9.]+"))
+            (2 * r_value) / (1 + r_value)
+          },
+          str_detect(., "ICC|interrater|IRR") ~ as.numeric(str_extract(., "[0-9.]+")),
+          str_detect(., "[0-9]") ~ as.numeric(str_extract(., "[0-9.]+")),
+          TRUE ~ NA_real_
+        )
+      )
+    )
+  )
+
+# Impute missing reliabilities
+div_scale_terciles <- quantile(dataset$items_div %>% unique() %>% setdiff(c(1, NA)), c(.33, .66), na.rm = TRUE)
+perf_scale_terciles <- quantile(dataset$items_perf %>% unique() %>% setdiff(c(1, NA)), c(.33, .66), na.rm = TRUE)
+
+dataset <- dataset %>%
+  mutate(div_tercile = cut(dataset$items_div, breaks = c(1, div_scale_terciles, Inf), labels = c(1, 2, 3), include.lowest = FALSE),
+         perf_tercile = cut(dataset$items_perf, breaks = c(1, perf_scale_terciles, Inf), labels = c(1, 2, 3), include.lowest = FALSE)
+) 
+
+div_reliabilities <-  split(dataset$reliab_div_conv, dataset$div_tercile) %>% map(na.omit)
+perf_reliabilities <- split(dataset$reliab_perf_conv, dataset$perf_tercile) %>% map(na.omit)
+
+sample_reliab <- function(x, items, type, tercile) {
+  if (!is.na(x)) return(x)
+  if (is.na(items)) {cat(str_sub(type,1,1)); return(NA)}
+  if (items == 1) return(1)
+  if (type == "div") {
+    return(sample(div_reliabilities[[as.character(tercile)]], 1))
+  }
+  if (type == "perf") {
+    return(sample(perf_reliabilities[[as.character(tercile)]], 1))
+  }
+  stop("Flow logic error in ", type)
+}
+
+#TK: consider need for team-size capping (would need to happen here)
+#TK: consider whether reliabilities should come from sub-categories (for diversity) - 
+# challenge: almost all cognitive, so little variance for others
+
+set.seed(1347)
+
+dataset <- dataset %>% rowwise() %>% 
+  mutate(
+  reliab_div = sample_reliab(reliab_div_conv, 
+                             items_div, "div", div_tercile),
+  reliab_perf = sample_reliab(reliab_perf_conv, 
+                             items_perf, "perf", perf_tercile)
+  ) %>% ungroup() %>% 
+  mutate(r_adj = r_rep / (sqrt(reliab_div) * sqrt(reliab_div)),
+         se =  sqrt((1 - r_rep^2) / (n_teams - 2)),
+         r_scale = ifelse(r_adj == 0, 1, r_adj/r_rep),
+         var_adj = se ^ 2 * (r_scale)^2) %>% 
+  select(-r_scale)
+```
+
+
+# Main meta-analysis
+
+```{r main, include=FALSE}
+# Estimate covariance matrix for CHE meta-analysis, following Harrer:
+# https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/multilevel-ma.html#fit-rve
+
+V <- with(dataset, 
+          impute_covariance_matrix(vi = var_adj,
+                                   cluster = articlestudy,
+                                   r = rho))
+
+meta_model_intercept <- rma.mv(r_adj ~ 1 + domain,
+                    V = V,
+                    random = ~ 1 | articlestudy/effect_id,
+                    data = dataset,
+                    sparse = TRUE)
+
+meta_model <- rma.mv(r_adj ~ 0 + domain,
+                    V = V,
+                    random = ~ 1 | articlestudy/effect_id,
+                    data = dataset,
+                    sparse = TRUE)
+
+
+confidence_intervals <- conf_int(meta_model, vcov = "CR2", p_values = TRUE)
+
+# Equivalence testing not implemented with RVE, but equivalent to inverting confidence intervals 
+# (Campbell, 2023: https://arxiv.org/abs/2004.01757)
+# For example, we will reject the above null hypothesis (H0: βk ≤ ∆k, lower or βk ≥ ∆k, upper), at a α significance level,
+# whenever a (1-2α)% CI for βk fits entirely within (∆k, lower, ∆k, upper).
+# To continue using RVE, we will do that here by searching for the smallest p-value for which this is true
+# p-value for test can be max(p-lower, p-upper) - so for symetric CIs and bounds, only need to consider one direction
+
+get_p_value <- function(model, coef, p_precision = .001, min_p = .0001, delta = .1) {
+  
+  confidence_interval <- conf_int(model, vcov = "CR2", coefs = coef, level = 1 - 2 * min_p)
+  
+  # Identify whether we care about lower or upper bound
+  direction = if (confidence_interval$beta < 0) "CI_L" else "CI_U"
+  
+  # Test boundary conditions
+  # Estimate outside interval
+  if (abs(confidence_interval$beta) >= delta) return(1)
+  
+  # p < min_p
+  if (abs(confidence_interval[[direction]]) < delta) {
+    message("Test significant at min_p, so returning 0. Make sure to report as <= ", format(min_p, scientific = FALSE))
+    return(0)
+  }
+  
+  # p >= .5
+  confidence_interval <- conf_int(model, vcov = "CR2", coefs = coef, level = .001)
+  if (abs(confidence_interval[[direction]]) > delta) {
+    warning("Test not significant at *p* = .495. One-sided tests cannot identify two-sided p-value above .5, so returning NA")
+    return(NA)
+  }
+  
+  alpha_high <- .495
+  alpha_low <- min_p
+  
+  while (alpha_high - alpha_low > p_precision) {
+    alpha_mid <- (alpha_high + alpha_low) / 2
+    confidence_interval <- conf_int(model, vcov = "CR2", coefs = coef, level = 1 - 2 * alpha_mid)
+    
+    if (abs(confidence_interval[[direction]]) < delta) {
+            alpha_high <- alpha_mid
+    } else {
+      alpha_low <- alpha_mid
+    }
+    }
+
+    return(alpha_high)
+  
+}
+
+confidence_intervals <- confidence_intervals %>% rowwise() %>% 
+  mutate(`equiv_.1` = get_p_value(meta_model, Coef, delta = .1),
+         `equiv_.05` = get_p_value(meta_model, Coef, delta = .05)) %>% 
+  ungroup()
+```
+
+## Report average effects and heterogeneity
+
+```{r}
+meta_summary <- summary(meta_model)
+meta_summary_intercept <- summary(meta_model_intercept)
+I2s <- mlm.variance.distribution(meta_model)
+
+# Calculate credibility intervals, following James Pustejovsky
+# https://stat.ethz.ch/pipermail/r-sig-meta-analysis/2019-April/001508.html
+
+cred_upper <- confidence_intervals$beta + 1.282 * sqrt(sum(meta_model$sigma2) + confidence_intervals$SE^2)
+cred_lower <- confidence_intervals$beta - 1.282 * sqrt(sum(meta_model$sigma2) + confidence_intervals$SE^2)
+
+confidence_intervals %>% 
+  mutate(Domain = Coef %>% str_remove("domain") %>% str_replace("_", "-"),
+         `*r*` = paste(fmt_cor(beta, 3), fmt_ci(CI_L, CI_U, 3), sigstars(p_val)),
+         `|*r*| < .1` = fmt_p(`equiv_.1`),
+         `|*r*| < .05` = fmt_p(`equiv_.05`),
+         `Credibility\ninterval` = fmt_ci(cred_lower, cred_upper, 3)) %>% 
+  select((ncol(.)-4):ncol(.)) %>% 
+  gt() %>% 
+  fmt_labels_md() %>% 
+  tab_source_note(md(paste0("\\", timesaveR:::.make_stars_note(timesaveR:::std_stars[-1])))) %>% 
+  gt_apa_style()
+  
+```
+
+Average effects significantly differed between diversity domains, `r res[str_detect(meta_summary_intercept, "^QM")]` (though not substantially so? TK - run equivalence test for this?)
+After accounting for that, significant amount of heterogeneity remained, `r res[str_detect(meta_summary, "^QE")]`
+
+`r I2s$result[3]$I2/100 %>% fmt_pct()` of the total variance in effect sizes can be attributed to study-level heterogeneity (I<sup>2</sup><sub>Level 3</sub>), while `r I2s$result[2]$I2/100 %>% fmt_pct()` can be attributed to heterogeneity between the effects studied (I<sup>2</sup><sub>Level 2</sub>).
+
+The 80% credibility intervals were very wide (Table x), so that substantial positive and negative associations can be regularly expected. Therefore, moderation analyses were crucial.
+
+# Meta-regression
+
+
+## Prepare moderators
+
+```{r}
+
+# TK - merge with Hofstede data
+# TK - retrieve GS citation counts
+
+if (!file.exists("data/hofstede.csv")) {
+  download.file("https://geerthofstede.com/wp-content/uploads/2016/08/6-dimensions-for-website-2015-08-16.csv", "data/hofstede.csv")
+}
+
+hofstede <- read_delim("data/hofstede.csv", delim = ";", na = "#NULL!", show_col_types = FALSE) %>% 
+  transmute(country, power_distance = pdi, collectivism = 100 - idv)
+
+# Some names in Hofstede differ
+# Data for Sri Lanka & Kazakhstan not available, so remains missing
+hofstede_map <- c(
+  "United States" = "U.S.A.", 
+  "Hong Kong SAR China" = "Hong Kong", 
+  "South Korea" = "Korea South", 
+  "United Kingdom" = "Great Britain",
+  "Cameroon" = "Africa West",  # where only regional data is available, used that
+  "United Arab Emirates" = "Arab countries",  
+  "Kuwait" = "Arab countries"
+)
+
+dataset <- dataset %>% 
+  mutate(hofstede_match = coalesce(hofstede_map[country], country)) %>% 
+  left_join(hofstede, by = c("hofstede_match" = "country")) %>% 
+  select(-hofstede_match)
+
+citation_counts <- read_excel("data/citation_data_en.xlsx") %>% distinct()
+
+dataset <- dataset %>% 
+  left_join(
+    citation_counts %>% select(id = ID, citation_count)
+  )
+  
+dataset <- dataset %>%
+    mutate(year_merged = coalesce(ifelse(str_detect(year_coll, "–|-"),
+                              sapply(str_split(year_coll, "–|-"), 
+                                     function(x) mean(as.numeric(x))),
+                              as.numeric(year_coll)),
+                              year))
+
+
+# Check for redundancy ??? TKlater - not preregistered, so needs to be conservative
+
+
+
+```
+
+# Assessment of heterogeneity
+
+TK-add:
+- Q-test
+- 80% cred interval
+
+
+## Impute data
+
+```{r}
+
+mi_vars <- 
+
+convert_to_factor <- function(x) {
+  if (is.character(x)) {
+    return(as.factor(x))
+  } else {
+    return(x)
+  }
+}
+
+dataset <- dataset %>% 
+  mutate(across(any_of(mi_vars), convert_to_factor))
+
+# Specify ordered factors
+dataset$longevity <- factor(dataset$longevity, levels = c("hours", "days", "weeks", "months", "years", "stable"), ordered = TRUE)
+dataset$interdep <- factor(dataset$interdep, levels = c("low", "medium", "high"), ordered = TRUE)
+dataset$complexity <- factor(dataset$complexity, levels = c("low", "medium", "high"), ordered = TRUE)
+
+# Get matrices
+
+
+# Set variables of interest to be predicted by each other, all others ignored
+preds <- imp$predictorMatrix
+preds[] <- 1  
+preds[, !colnames(preds) %in% mi_vars] <- 0
+preds[!rownames(preds) %in% mi_vars, ] <- 0
+  
+
+```
+
+
+# Meta-CART
+
+## Combine ES
+
+```{r}
+datasets_single <- dataset %>% 
+  group_by(articlestudy, `Publication status`, `Article  focus`, year_merged, Design, Rater, Criterion, collectivism, Interdependence, 
+           Complexity, Longevity, Virtuality, `Authority  differentiation`, `Diversity climate`, `Psych safety`, Domain, 
+           `Sub-domain`, `Measure type`) %>% 
+  summarise(#TK - calculate linear composite) %>%
+  group_by(articlestudy, Domain) %>% 
+  slice_sample(n = 1) %>% 
+  ungroup() %>% 
+  split(.$Domain)
+  
+# Complete the three datasets with 1) best estimate and 2) random draw
+    
+```
+
+# Publication bias
+
+```{r}
+datasets_pub <- dataset %>% 
+  filter(`Publication status` == "Published") %>% 
+  split(.$Domain)
+
+# Exploratory analysis - are *claims* about diversity shaped by publication bias?
+datasets_focal_pub <- dataset %>% 
+  filter(`Publication status` == "Published", `Article  focus` = "focal H") %>% 
+  split(.$Domain)
+```
+
+
+(Rodgers & Pustejovsky, 2021). In line with the simulation results and recommendations by Rodgers and Pustejovsky, we used two methods to test for publication bias. Firstly, 
+
+## Funnel plots
+
+```{r}
+cur_data <- datasets_pub[[1]] 
+
+# Create funnel plots with all data split by domain, coloring points grey, with `Publication status` == "Published" in mid blue and `Publication status` == "Published", `Article  focus` = "focal H" in dark blue
+
+# Load earlier estimate?
+estimate <-
+sd <-
+
+# Now, compute vectors of the lower-limit and upper limit values for
+# the 95% CI region, using the range of SE that you generated in the previous step, and the stored value of your meta-analytic estimate.
+se.seq=seq(0, max(cur_data$r_adj), 0.001)
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+ 
+# You can do this for a 99% CI region too
+ll99 = estimate-(3.29*se.seq)
+ul99 = estimate+(3.29*se.seq)
+ 
+# And finally, do the same thing except now calculating the confidence interval
+# for your meta-analytic estimate based on the stored value of its standard error
+meanll95 = estimate-(1.96*se)
+meanul95 = estimate+(1.96*se)
+ 
+# Now, smash all of those calculated values into one data frame (called 'dfCI').
+dfCI = data.frame(ll95, ul95, ll99, ul99, se.seq, estimate, meanll95, meanul95)
+ 
+# Add a color column to the dataset based on the specified criteria
+dataset$color <- ifelse(dataset$`Publication status` == "Published" & dataset$`Article focus` == "focal H", "dark blue",
+                        ifelse(dataset$`Publication status` == "Published", "mid blue", "grey"))
+
+# Make the funnel plot.
+fp <- ggplot(aes(y = se, x = Zr), data = dataset) +
+  geom_point(aes(color = color), shape = 1) +
+  scale_color_identity() +
+  xlab('Zr') + ylab('Standard Error') +
+  geom_line(aes(y = se.seq, x = ll95), linetype = 'dotted', data = dfCI) +
+  geom_line(aes(y = se.seq, x = ul95), linetype = 'dotted', data = dfCI) +
+  geom_line(aes(y = se.seq, x = ll99), linetype = 'dashed', data = dfCI) +
+  geom_line(aes(y = se.seq, x = ul99), linetype = 'dashed', data = dfCI) +
+  geom_segment(aes(y = min(se.seq), x = meanll95, yend = max(se.seq), xend = meanll95), linetype='dotted', data=dfCI) +
+  geom_segment(aes(y = min(se.seq), x = meanul95, yend = max(se.seq), xend = meanul95), linetype='dotted', data=dfCI) +
+  scale_x_continuous(breaks=seq(-1.25, 2, 0.25)) +
+  scale_x_reverse() +
+  timesaveR::theme_apa()
+
+```
+
+
+## Egger's test
+
+we used an Egger’s regression test to assess the asymmetry of the funnel plot, with Robust Variance Estimation (RVE) taking care of dependence between effect sizes. In order to strike an appropriate balance between statistical power and Type I errors, we followed the common practice highlighted by Siegel and colleagues (2021) and interpreted p-values below .1 as evidence for publication bias.
+
+```{r}
+
+datasets_published <- dataset  %>% 
+    filter(pub_status == "Published")  %>%
+    split(.$diversity_domain)
+
+# Run Egger's test with Robust Variance Estimation
+
+eggers_tests <- map(datasets_published, \(cur_dataset) {
+    rho <- .6
+
+    V <- with(cur_dataset,
+            impute_covariance_matrix(vi = var_adj,
+                                    cluster = articlestudy,
+                                    r = rho))
+
+    egger_multi <- rma.mv(yi = adj_cor, V = V, random = ~ 1 | articlestudy, mods = ~ adj_se, data = cur_dataset)
+    coef_test(egger_multi, vcov = "CR2")
+})
+
+# TK - figure out how to display and report
+
+```
+
+
+## 3 PSM
+
+Secondly, we used the 3-parameter selection model (3PSM) to directly estimate whether non-significant results have a lower chance of being published than significant findings. This cannot presently be extended to account for dependent effect sizes but sampling one effect size per sample results in a test that combines comparatively high power with a predictable Type I error rate. Therefore, we bootstrapped 3PSM with effect size sampling, and report the median results and distribution of 5,000 bootstrap resamples. Given that an alpha level of .05 is associated with a Type I error rate of up to 10%, we relied on this threshold (Rodgers & Pustejovsky, 2021). 
+
+Roders & Pustejovsky (2023?) show that sampling leads to much lower Type I error rates than
+ignoring dependency or aggregating effects for 3PSM
+
+```{r}
+
+# Define a function for 3PSM
+apply_3psm <- function(data) {
+    m.rma <- rma(yi = r_adj,        
+                sei = se_adj,
+                data = data,
+                slab = authorstudy,
+                method = "REML",
+                test = "knha")
+    psm_mod <- selmodel(m.rma,
+            type = "stepfun",
+            steps = 0.025)  
+    # Creating a dataframe with required elements
+    df <- data.frame(
+        #TK - fix these once based on metafor model
+        SignificanceTest = m.selmodel$pval, 
+        EffectEstimateRatio = m.rma$beta / m.selmodel$beta,
+        CoefNonSig = ifelse(m.selmodel$pval > 0.05, m.selmodel$beta, NA)
+    )
+}
+
+# Bootstrap sampling and applying 3PSM
+set.seed(123) # for reproducibility
+n_bootstraps <- 1000
+all_estimates <- numeric(n_bootstraps)
+
+boot_res <- list()
+for (i in 1:n_bootstraps) {
+  # Sample one effect size per article/study group
+  boot_sample <- do.call("rbind", lapply(split(data, data$articlestudy), function(group) {
+    if (nrow(group) > 1) {
+      group[sample(nrow(group), 1), ]
+    } else {
+      group
+    }
+  }))
+  boot_res <- c(boot_res, apply_3psm(boot_sample))
+}
+
+boot_res <- bind_rows(boot_res)
+
+# Calculate median estimates
+# TK - do this once retun values are clear
+median_estimate <- median(all_estimates)
+
+# Visualization
+hist(all_estimates, main = "Distribution of 3PSM Estimates", xlab = "Estimate")
+abline(v = median_estimate, col = "red")
+
+
+
+```
+
+
+# Stat checks
+
+## GRIM and GRIMMER
+
+```{r}
+# Add trailing 0s manually
+
+
+#TK test whether trailing 0 are maintained if entered, then fix prec here
+GRIMMER_div <- dataset %>% filter(!is.na(M_div)) %>% select(ID, `N teams`, Items_div:Notes_div) %>% 
+  mutate(N = ifelse(!is.na(Notes_div) & str_detect(Notes_div, "N = "), str_extract(Notes_div, "\\d+") %>% as.numeric(), `N teams` %>% as.numeric()),
+         across(Items_div:SD_div, as.numeric)) %>% 
+  rowwise() %>% 
+  mutate(GRIM = GRIM_test(M_div, N, n_items = Items_div),
+         GRIMMER_std = if (GRIM) GRIMMER_test(M_div, SD_div, N, n_items = Items_div) else FALSE,
+         # min_val and max_val are guessed with a simple heuristic - needs further investigation if they fail
+         GRIMMER_minmax = if (GRIMMER_std) GRIMMER_test(M_div, SD_div, N, n_items = Items_div, min_val = 1, max_val = Options_div) else FALSE)
+
+GRIMMER_perf <- dataset %>% filter(!is.na(M_perf)) %>% select(ID, `N teams`, Items_perf:Notes_perf) %>% 
+  mutate(N = ifelse(!is.na(Notes_perf) & str_detect(Notes_perf, "N = "), str_extract(Notes_perf, "\\d+") %>% as.numeric(), `N teams` %>% as.numeric()),
+         across(Items_perf:SD_perf, as.numeric)) %>% 
+  rowwise() %>% 
+  mutate(GRIM = GRIM_test(M_perf, N, n_items = Items_perf),
+         GRIMMER_std = if (GRIM) GRIMMER_test(M_perf, SD_perf, N, n_items = Items_perf) else FALSE)
+
+,
+         # min_val and max_val are guessed with a simple heuristic - needs further investigation if they fail
+         GRIMMER_minmax = if (GRIMMER_std) GRIMMER_test(M_perf, SD_perf, N, n_items = Items_perf, min_val = 1, max_val = Options_perf) else FALSE)
+
+
+
+```
+
+
