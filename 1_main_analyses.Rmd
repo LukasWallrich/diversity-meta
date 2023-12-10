@@ -332,8 +332,8 @@ confidence_intervals <- confidence_intervals %>% rowwise() %>%
 ## Report average effects and heterogeneity
 
 ```{r}
-meta_summary <- summary(meta_model)
-meta_summary_intercept <- summary(meta_model_intercept)
+meta_summary <- summary(meta_model) %>% capture.output()
+meta_summary_intercept <- summary(meta_model_intercept)  %>% capture.output()
 I2s <- mlm.variance.distribution(meta_model)
 
 # Calculate credibility intervals, following James Pustejovsky
@@ -356,10 +356,10 @@ confidence_intervals %>%
   
 ```
 
-Average effects significantly differed between diversity domains, `r res[str_detect(meta_summary_intercept, "^QM")]` (though not substantially so? TK - run equivalence test for this?)
-After accounting for that, significant amount of heterogeneity remained, `r res[str_detect(meta_summary, "^QE")]`
+Average effects significantly differed between diversity domains, `r meta_summary_intercept[str_detect(meta_summary_intercept, "^QM")]` (though not substantially so? TK - run equivalence test for this?)
+After accounting for that, significant amount of heterogeneity remained, `r meta_summary[str_detect(meta_summary, "^QE")]`
 
-`r I2s$result[3]$I2/100 %>% fmt_pct()` of the total variance in effect sizes can be attributed to study-level heterogeneity (I<sup>2</sup><sub>Level 3</sub>), while `r I2s$result[2]$I2/100 %>% fmt_pct()` can be attributed to heterogeneity between the effects studied (I<sup>2</sup><sub>Level 2</sub>).
+`r fmt_pct(as.numeric(I2s$result$I2[3])/100)` of the total variance in effect sizes can be attributed to study-level heterogeneity (I<sup>2</sup><sub>Level 3</sub>), while `r fmt_pct(as.numeric(I2s$result$I2[2])/100)` can be attributed to heterogeneity between the effects studied (I<sup>2</sup><sub>Level 2</sub>).
 
 The 80% credibility intervals were very wide (Table x), so that substantial positive and negative associations can be regularly expected. Therefore, moderation analyses were crucial.
 
@@ -369,10 +369,6 @@ The 80% credibility intervals were very wide (Table x), so that substantial posi
 ## Prepare moderators
 
 ```{r}
-
-# TK - merge with Hofstede data
-# TK - retrieve GS citation counts
-
 if (!file.exists("data/hofstede.csv")) {
   download.file("https://geerthofstede.com/wp-content/uploads/2016/08/6-dimensions-for-website-2015-08-16.csv", "data/hofstede.csv")
 }
@@ -392,6 +388,8 @@ hofstede_map <- c(
   "Kuwait" = "Arab countries"
 )
 
+#TK: consider adding regional composites for few-country samples?
+
 dataset <- dataset %>% 
   mutate(hofstede_match = coalesce(hofstede_map[country], country)) %>% 
   left_join(hofstede, by = c("hofstede_match" = "country")) %>% 
@@ -403,6 +401,7 @@ dataset <- dataset %>%
   left_join(
     citation_counts %>% select(id = ID, citation_count)
   )
+
   
 dataset <- dataset %>%
     mutate(year_merged = coalesce(ifelse(str_detect(year_coll, "–|-"),
@@ -411,25 +410,20 @@ dataset <- dataset %>%
                               as.numeric(year_coll)),
                               year))
 
+sum(is.na(dataset$year_merged))
+
 
 # Check for redundancy ??? TKlater - not preregistered, so needs to be conservative
-
-
-
 ```
-
-# Assessment of heterogeneity
-
-TK-add:
-- Q-test
-- 80% cred interval
-
 
 ## Impute data
 
+- Exclude variables with > 95% missing (psych safety and diversity climate)
+- TK: how to deal with MNAR variables (virtuality, and likely authority diff)?
+
 ```{r}
 
-mi_vars <- 
+mi_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "teams_function", "country", "n_teams", "stud_sample", "tmt", "domain", "sub_dom", "meas_type", "criterion", "rater", "interdep", "complexity", "longevity", "virtuality", "auth_diff", "power_distance", "collectivism", "year_merged")
 
 convert_to_factor <- function(x) {
   if (is.character(x)) {
@@ -448,15 +442,80 @@ dataset$interdep <- factor(dataset$interdep, levels = c("low", "medium", "high")
 dataset$complexity <- factor(dataset$complexity, levels = c("low", "medium", "high"), ordered = TRUE)
 
 # Get matrices
+imp <- mice(dataset, maxit=0, seed = 1526)
 
 
 # Set variables of interest to be predicted by each other, all others ignored
-preds <- imp$predictorMatrix
-preds[] <- 1  
-preds[, !colnames(preds) %in% mi_vars] <- 0
-preds[!rownames(preds) %in% mi_vars, ] <- 0
-  
+# TK: Get this to work without quickpred? Somewhat too atheoretical and ignoring multivariate context?
 
+preds <- imp$predictorMatrix
+preds[] <- 0  
+pred_matrix <- dataset %>% select(all_of(mi_vars)) %>% quickpred_ext()
+preds[rownames(pred_matrix), colnames(pred_matrix)] <- pred_matrix
+
+
+# Standard methods per variable type are generally good (polyreg for factors, polr for ordered, pmm for continuous)  
+# but polyreg does not work well with many factor levels - so these set to pmm
+methods <- imp$method
+methods[c("ind_sector", "teams_function", "country", "sub_dom")] <- "pmm"
+methods[!names(methods) %in% mi_vars] <- ""
+
+# Van Buren - set m to average share missing
+# https://stefvanbuuren.name/fimd/sec-howmany.html
+m <- dataset %>% select(all_of(mi_vars)) %>% naniar::pct_miss() %>% ceiling()
+m
+
+# TK - remove to that higher m is used, this just for quick model building
+m <- 3
+
+
+domains <- dataset$domain
+# Ensure that sub-domains are only imputed within each domain (otherwise get invalid imputations)
+mice.impute.imp_sub_domain <- function(y, ry, x, ...) {
+  # y is the vector to be imputed
+  # ry is a logical vector indicating which values in y are missing
+  # x is the matrix of predictor variables, already filtered by predMatrix
+  dots <- list(...)
+
+  # Domain information cannot be extracted from x as it is dummy-coded there, so take from global env
+  unique_domains <- unique(domains)  # Consider only domains where y is missing
+  
+  imputed <- rep(NA, sum(dots$wy))  # Start with y and replace missing values
+
+  imps <- list()
+  
+  for (d in unique_domains) {
+    # Subset data for the current domain
+    rows_in_domain <- which(domains == d)  # Rows in this domain where y is missing
+    y_sub <- y[rows_in_domain]
+    x_sub <- x[rows_in_domain, ]
+    ry_sub <- ry[rows_in_domain]
+    dots_sub <- dots
+    dots_sub$wy <- dots_sub$wy[rows_in_domain]
+    
+    # Apply polyreg imputation method for the current domain
+    args_list <- c(list(y_sub, ry_sub, x_sub), dots_sub)
+    imp <- do.call("mice.impute.polyreg", args_list)
+    
+    # Assign the imputed values back to the result vector
+    #imputed[rows_in_domain] <- imp
+    
+    imps[d] <- list(imp)
+  }
+  
+    # Order imps content based on domains and locations specified in wy
+  ds <- domains[dots$wy]
+  
+    for (d in unique_domains) {
+      imputed[ds == d] <- unlist(imps[d])
+    }    
+  
+  return(imputed)
+}
+
+methods["sub_dom"] <- "imp_sub_domain"
+
+imp <- mice(dataset, m = m, seed = 1526, predictorMatrix = preds, method = methods)
 ```
 
 
