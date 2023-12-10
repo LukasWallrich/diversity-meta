@@ -465,10 +465,6 @@ methods[!names(methods) %in% mi_vars] <- ""
 m <- dataset %>% select(all_of(mi_vars)) %>% naniar::pct_miss() %>% ceiling()
 m
 
-# TK - remove to that higher m is used, this just for quick model building
-m <- 3
-
-
 domains <- dataset$domain
 # Ensure that sub-domains are only imputed within each domain (otherwise get invalid imputations)
 mice.impute.imp_sub_domain <- function(y, ry, x, ...) {
@@ -517,6 +513,114 @@ methods["sub_dom"] <- "imp_sub_domain"
 
 imp <- mice(dataset, m = m, seed = 1526, predictorMatrix = preds, method = methods)
 ```
+
+## Run meta-regression
+
+Citation count ommitted as it was registered as exploratory and logically cannot predict (precede) effect size
+
+```{r}
+# Ordered factors lead to non-sensical model outputs (polynomials)
+
+meta_reg_models <- with(imp,
+                        {
+                        V <-  impute_covariance_matrix(vi = var_adj,
+                                   cluster = articlestudy,
+                                   r = rho)
+
+                        longevity <- factor(longevity, ordered = FALSE) %>% relevel(ref = "stable")
+                        interdep <- factor(interdep, ordered = FALSE)
+                        complexity <- factor(complexity, ordered = FALSE)
+                        
+                        domain <- domain %>% relevel(ref = "Demographic")
+                        design <- design %>% relevel(ref = "Observational")
+                        rater <- rater %>% relevel(ref = "Objective")
+                        
+                        mod <- rma.mv(r_adj ~ 1 + domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
+                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus,
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              sparse = TRUE)
+                        
+                        robu <- coef_test(mod, vcov="CR2")
+                        
+                        return(list(mod = mod, robu = robu))
+                        })
+
+
+robu_coefs <- map(meta_reg_models$analyses, "robu")
+
+# pool results with clubSandwich standard errors
+# Based on Pustejovsky's 2017 blog: https://www.jepusto.com/mi-with-clubsandwich/
+
+robust_pooled <- 
+  robu_coefs %>%
+  
+  # add coefficient names as a column
+  lapply(function(x) {
+    x$coef <- row.names(x)
+    x
+  }) %>%
+  bind_rows() %>%
+  as.data.frame() %>%
+  
+  # summarize by coefficient
+  group_by(coef) %>%
+  summarise(
+    m = n(),
+    B = var(beta),
+    beta_bar = mean(beta),
+    V_bar = mean(SE^2),
+    eta_bar = mean(df)
+  ) %>%
+  
+  mutate(
+    
+    # calculate intermediate quantities to get df
+    V_total = V_bar + B * (m + 1) / m,
+    gamma = ((m + 1) / m) * B / V_total,
+    df_m = (m - 1) / gamma^2,
+    df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
+    df = 1 / (1 / df_m + 1 / df_obs),
+    
+    # calculate summary quantities for output
+    se = sqrt(V_total),
+    t = beta_bar / se,
+    p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
+    crit = qt(0.975, df = df),
+    lo95 = beta_bar - se * crit,
+    hi95 = beta_bar + se * crit
+  )
+
+robust_pooled %>%
+  select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma) %>%
+  mutate_at(vars(est:gamma), round, 3)
+
+
+
+            V <-  with(dataset, impute_covariance_matrix(vi = var_adj,
+                                   cluster = articlestudy,
+                                   r = rho))
+
+meta_reg_obs <-  rma.mv(r_adj ~ 1 + domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
+                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus,
+                              V = V,
+                        data = dataset,
+                              random = ~ 1 | articlestudy/effect_id,
+                              sparse = TRUE)
+
+
+with(dataset, {
+  complexity <- factor(complexity, ordered = FALSE)
+  rma.mv(r_adj ~ 1 + complexity,
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              sparse = TRUE)
+}) %>% summary()
+
+pool(meta_reg_models) %>% summary() %>% arrange((p.value))
+
+```
+
 
 
 # Meta-CART
