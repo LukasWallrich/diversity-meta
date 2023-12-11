@@ -14,10 +14,12 @@ Author: Lukas Wallrich
 ---
 
 ```{r setup, include=FALSE}
-#
 if (!require(groundhog)) install.packages('groundhog')
 groundhog::groundhog.library(c("readxl", "TOSTER", "metafor", "tidyverse", "clubSandwich", "cli", "rsprite2", "esc",
                                "mice", "metacart", "gt"), date = "2023-07-09")
+
+# Need more recent version of patchwork due to faceting bug
+groundhog::groundhog.library(c("sf", "rworldmap", "numform", "patchwork"), date = "2023-07-09")
 
 groundhog::groundhog.library(c("lukaswallrich/timesaveR"), date = "2023-07-09")
 
@@ -121,9 +123,90 @@ dataset <- effect_sizes_en %>%
 
 # Check data types
 
-dataset <- dataset %>% mutate(n_teams = as.numeric(n_teams), domain = as.factor(domain))
+dataset <- dataset %>% mutate(n_teams = as.numeric(n_teams), domain = domain %>% str_replace("_", "-") %>% as.factor() %>% relevel(ref = "Demographic"))
 
 ```
+
+## Sample description
+
+### Global distribution
+
+```{r}
+source("helpers/world_map.R")
+
+teams <- dataset %>% 
+  filter(!is.na(country), !country == "Multiple") %>% 
+  mutate(country = case_when(
+    country == "United States" ~ "United States of America",
+    country == "Hong Kong SAR China" ~ "Hong Kong",
+    TRUE ~ country
+  )) %>% 
+  group_by(articlestudy, country) %>% 
+  # TK: Goes wrong where only sub-groups are compared
+  # TK: Fix this - likely by manually checking d and OR effect sizes
+  # TK: Also, adjust US outliers (patenting studies - not sure how)
+  summarise(n_teams = max(n_teams)) %>% 
+  ungroup() %>% 
+  {
+    create_world_map(.$country, .$n_teams, "teams", scale_start = 10)
+  }
+
+studies <- dataset %>% 
+  filter(!is.na(country), !country == "Multiple") %>% 
+  mutate(country = case_when(
+    country == "United States" ~ "United States of America",
+    country == "Hong Kong SAR China" ~ "Hong Kong",
+    TRUE ~ country
+  )) %>% 
+  group_by(articlestudy, country) %>% 
+  # TK: Goes wrong where only sub-groups are compared
+  # TK: Fix this - likely by manually checking d and OR effect sizes
+  # TK: Also, adjust US outliers (patenting studies - not sure how)
+  summarise(studies = 1) %>% 
+  ungroup() %>% 
+  {
+    create_world_map(.$country, .$studies, "studies")
+  }
+
+omitted <- dataset %>% 
+  filter(is.na(country) | country == "Multiple") %>% 
+  mutate(status = ifelse(is.na(country), "unknown", "multiple")) %>% 
+  group_by(status, articlestudy) %>% 
+  summarise(n_teams = max(n_teams), n_studies = 1) %>% 
+  summarise(n_teams = sum(n_teams), n_studies = sum(n_studies))
+
+teams / studies + plot_annotation(
+  caption = glue("The maps exclude {omitted[omitted$status == 'multiple', 'n_studies']} studies ({scales::comma(round(omitted[omitted$status == 'multiple', 'n_teams'])[[1]])} teams) covering multiple countries, and {omitted[omitted$status == 'unknown', 'n_studies']} studies ({scales::comma(round(omitted[omitted$status == 'unknown', 'n_teams'])[[1]])} teams) where the country was not reported.") %>% str_wrap(60))
+          
+
+```
+
+### Distribution over time
+
+```{r}
+studies <- dataset %>% group_by(year, domain, articlestudy) %>% summarise(n = 1, .groups = "drop") %>% mutate(type = "Studies")
+studies_tot <- dataset %>% group_by(year, articlestudy) %>% summarise(n = 1, .groups = "drop") %>% mutate(type = "Studies", domain = "Total")
+effects <- dataset %>% group_by(year, domain, articlestudy) %>% summarise(n = n(), .groups = "drop") %>% mutate(type = "Effects")
+effects_tot <- dataset %>% group_by(year, articlestudy) %>% summarise(n = n(), .groups = "drop") %>% mutate(type = "Effects", domain = "Total")
+
+stud_plot <- bind_rows(studies, studies_tot) %>% 
+  ggplot(aes(x = year, y = n, fill = domain)) +
+  geom_col() +
+  facet_grid(domain ~ type, switch = "y")
+ 
+
+eff_plot <- bind_rows(effects, effects_tot) %>% 
+  ggplot(aes(x = year, y = n, fill = domain)) +
+  geom_col() +
+  facet_grid(domain ~ type, switch = "y")
+
+stud_plot + eff_plot & 
+  jtools::theme_apa() & 
+  theme(legend.position = "none", strip.placement = "outside") &
+   labs(x = "", y = "")
+```
+
+
 
 ## Estimate 'corrected' correlations and standard errors
 
@@ -356,6 +439,8 @@ confidence_intervals %>%
   
 ```
 
+RQ1a: Is the link between diversity and team performance insubstantial (i.e., |r| < .1)? Does this differ between the dimensions of diversity?
+
 Average effects significantly differed between diversity domains, `r meta_summary_intercept[str_detect(meta_summary_intercept, "^QM")]` (though not substantially so? TK - run equivalence test for this?)
 After accounting for that, significant amount of heterogeneity remained, `r meta_summary[str_detect(meta_summary, "^QE")]`
 
@@ -514,6 +599,81 @@ methods["sub_dom"] <- "imp_sub_domain"
 imp <- mice(dataset, m = m, seed = 1526, predictorMatrix = preds, method = methods)
 ```
 
+## Individually test moderators
+
+Partly for consistency with earlier work, partly as we cannot determine significance of moderators (rather than individual levels) from meta-regression as we cannot presently pool Q-test (or Wald test) results (https://www.jepusto.com/mi-with-clubsandwich/)
+
+RQ 1: Does team diversity predict team performance? How does this differ between the dimensions of diversity and the performance task under consideration?
+
+RQ1a: Is the link between diversity and team performance insubstantial (i.e., |r| < .1)? Does this differ between the dimensions of diversity?
+
+H1: Diversity has a substantial positive association with performance when the task is high in complexity.
+H2: Diversity has a more positive association with team performance when the task requires a high level of interdependence.
+
+H3a: Diversity has a more negative link to performance in tasks that focus on maximizing production of an output with a pre-defined strategy. (DON'T HAVE DATA?)
+H3b: Diversity has a more positive link to performance in tasks where performance depends on creative divergence rather than convergence. (NEED TO DO WITH OBSERVED DATA - NO IMPUTATION)
+
+RQ2: How does the relationship between diversity and performance differ across space and time?
+RQ2a: Is the relationship between team diversity and performance related to a country’s level of collectivism versus individualism?
+
+H4a: The relationship between diversity (particularly demographic diversity) and team performance has become more positive over time.
+H4b: The relationship between diversity and team performance is positive and substantial (i.e. r > .1) in evidence from the past decade (2012-2022).
+
+RQ3: How do contextual factors influence the relationship of diversity with team performance?
+H5: Diversity has a more positive link to performance when the team works in a context that has a positive diversity climate. (DON'T HAVE DATA?)
+H6: Diversity has a more positive link to performance when teams experience high levels of psychological safety. (DON'T HAVE DATA?)
+H7: Diversity has a more positive link to performance when the team is low in authority differentiation than when it is high in authority differentiation. (REPLACE BY POWER DISTANCE?)
+
+RQ3a: How does the link between diversity and performance differ depending on teams’ level of virtuality? (PROBLEMATIC DATA)
+
+RQ3b: How does the link between diversity and performance differ depending on the longevity of a team?
+
+RQ4: How do methodological choices influence the relationship of diversity with team performance?
+RQ4a: How does the link between diversity and performance differ depending on whether performance is rated subjectively or measured objectively?
+H8: Diversity will have more positive associations with performance where it is measured as variety rather than separation.
+H9: Studies where the link between diversity and performance is the focal hypothesis will report larger (H8a) and more positive (H8b) effect sizes than studies where this is an auxiliary or descriptive result.
+
+- Compare published vs unpublished ES
+- Design (exp + quasi vs Observational)
+
+Citations:
+- Correlated with ES? [Cannot meaningfully assess signifiance due to prevalent repeated measures]
+
+```{r}
+
+moderators <- c("complexity", "interdep", "year_merged", "collectivism", "longevity", "meas_type", "rater", "design", "art_focus")
+
+      dataset$domain <- dataset$domain %>% relevel(ref = "Demographic")
+
+mod <- with(dataset, {
+                          V <-  impute_covariance_matrix(vi = var_adj,
+                                   cluster = articlestudy,
+                                   r = rho)
+                          
+  interdep <- factor(interdep, ordered = FALSE)
+  
+  mod <- rma.mv(r_adj ~ 0 + interdep,
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              sparse = TRUE)
+  
+  mod_domains <- rma.mv(r_adj ~ 0 + domain + domain:interdep,
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              sparse = TRUE)
+  
+  
+})
+
+
+domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
+                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus
+
+```
+
+
+
+
 ## Run meta-regression
 
 Citation count ommitted as it was registered as exploratory and logically cannot predict (precede) effect size
@@ -539,7 +699,8 @@ meta_reg_models <- with(imp,
                                  domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus,
                               V = V,
                               random = ~ 1 | articlestudy/effect_id,
-                              sparse = TRUE)
+                              sparse = TRUE,
+                              control=list(rel.tol=1e-8))
                         
                         robu <- coef_test(mod, vcov="CR2")
                         
@@ -548,6 +709,7 @@ meta_reg_models <- with(imp,
 
 
 robu_coefs <- map(meta_reg_models$analyses, "robu")
+meta_reg_models_mods <- map(meta_reg_models$analyses, "mod")
 
 # pool results with clubSandwich standard errors
 # Based on Pustejovsky's 2017 blog: https://www.jepusto.com/mi-with-clubsandwich/
@@ -570,7 +732,7 @@ robust_pooled <-
     B = var(beta),
     beta_bar = mean(beta),
     V_bar = mean(SE^2),
-    eta_bar = mean(df)
+    eta_bar = mean(df_Satt)
   ) %>%
   
   mutate(
@@ -593,7 +755,8 @@ robust_pooled <-
 
 robust_pooled %>%
   select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma) %>%
-  mutate_at(vars(est:gamma), round, 3)
+  mutate_at(vars(est:gamma), round, 3) %>% arrange((p_val))
+
 
 
 

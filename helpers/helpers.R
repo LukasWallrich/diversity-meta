@@ -1,3 +1,46 @@
+# Implement patchwork bugfix in older version here
+# From https://github.com/thomasp85/patchwork/issues/325
+
+add_strips <- function(gt) {
+  panel_loc <- find_panel(gt)
+  strip_pos <- switch(
+    find_strip_pos(gt),
+    inside = 0,
+    outside = 2
+  )
+  if (!any(grepl('strip-b', gt$layout$name))) {
+    gt <- gtable_add_rows(gt, unit(0, 'mm'), panel_loc$b + strip_pos)
+  } else if (strip_pos == 2 && !any(gt$layout$b == panel_loc$b + 2)) {
+    # Merge the strip-gap height into the axis and remove it. Only performed if
+    # an axis exist
+    gt$heights[panel_loc$b + 1] <- sum(gt$heights[panel_loc$b + c(1, 2)])
+    gt <- gt[-(panel_loc$b + 2), ]
+  }
+  if (!any(grepl('strip-t', gt$layout$name))) {
+    gt <- gtable_add_rows(gt, unit(0, 'mm'), panel_loc$t - 1 - strip_pos)
+  } else if (strip_pos == 2 && !any(gt$layout$t == panel_loc$t - 2)) {
+    gt$heights[panel_loc$t - 1] <- sum(gt$heights[panel_loc$t - c(1, 2)])
+    gt <- gt[-(panel_loc$t - 2), ]
+  }
+  if (!any(grepl('strip-r', gt$layout$name))) {
+    gt <- gtable_add_cols(gt, unit(0, 'mm'), panel_loc$r + strip_pos)
+  } else if (strip_pos == 2 && !any(gt$layout$r == panel_loc$r + 2)) {
+    gt$widths[panel_loc$r + 1] <- sum(gt$widths[panel_loc$r + c(1, 2)])
+    gt <- gt[, -(panel_loc$r + 2)]
+  }
+  if (!any(grepl('strip-l', gt$layout$name))) {
+    gt <- gtable_add_cols(gt, unit(0, 'mm'), panel_loc$l - 1 - strip_pos)
+  } else if (strip_pos == 2) {
+    gt$widths[panel_loc$l - 1] <- sum(gt$widths[panel_loc$l - c(1, 2)])
+    gt <- gt[, -(panel_loc$l - 2)]
+  }
+  gt
+}
+
+environment(add_strips) <- asNamespace("patchwork")
+assignInNamespace("add_strips", add_strips, ns = "patchwork")
+
+
 # From modelsummary:::fmt_labels_md
 # Authored by Lukas Wallrich
 
