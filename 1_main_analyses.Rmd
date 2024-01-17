@@ -16,7 +16,7 @@ Author: Lukas Wallrich
 ```{r setup, include=FALSE}
 if (!require(groundhog)) install.packages('groundhog')
 groundhog::groundhog.library(c("readxl", "TOSTER", "metafor", "tidyverse", "clubSandwich", "cli", "rsprite2", "esc",
-                               "mice", "metacart", "gt"), date = "2023-07-09")
+                               "mice", "metacart", "gt", "gtExtras"), date = "2023-07-09")
 
 # Need more recent version of patchwork due to faceting bug
 groundhog::groundhog.library(c("sf", "rworldmap", "numform", "patchwork"), date = "2023-07-09")
@@ -76,21 +76,21 @@ rename_vec_en <- c(
   sub_dom = "Sub-domain",
   div_specific = "Specify",
   meas_type = "Measure type",
-  items_div = "Items...31",
-  opts_div = "Options...32",
-  m_div = "M...33",
-  sd_div = "SD...34",
-  reliab_div = "Reliability Cronbach's alpha (or note)...35",
-  notes_div = "Notes...36",
+  items_div = "Items...30",
+  opts_div = "Options...31",
+  m_div = "M...32",
+  sd_div = "SD...33",
+  reliab_div = "Reliability Cronbach's alpha (or note)...34",
+  notes_div = "Notes...35",
   name_perf = "Name",
   criterion = "Criterion",
   rater = "Rater",
-  items_perf = "Items...40",
-  opts_perf = "Options...41",
-  m_perf = "M...42",
-  sd_perf = "SD...43",
-  reliab_perf = "Reliability Cronbach's alpha (or note)...44",
-  notes_perf = "Notes...45",
+  items_perf = "Items...39",
+  opts_perf = "Options...40",
+  m_perf = "M...41",
+  sd_perf = "SD...42",
+  reliab_perf = "Reliability Cronbach's alpha (or note)...43",
+  notes_perf = "Notes...44",
   r = "r",
   d = "d",
   other = "other",
@@ -184,31 +184,288 @@ teams / studies + plot_annotation(
 ### Distribution over time
 
 ```{r}
-studies <- dataset %>% group_by(year, domain, articlestudy) %>% summarise(n = 1, .groups = "drop") %>% mutate(type = "Studies")
-studies_tot <- dataset %>% group_by(year, articlestudy) %>% summarise(n = 1, .groups = "drop") %>% mutate(type = "Studies", domain = "Total")
+studies <- dataset %>% group_by(year, domain, articlestudy) %>% summarise(n = 1, .groups = "drop") %>% mutate(type = "Samples")
+studies_tot <- dataset %>% group_by(year, articlestudy) %>% summarise(n = 1, .groups = "drop") %>% mutate(type = "Samples", domain = "Total")
 effects <- dataset %>% group_by(year, domain, articlestudy) %>% summarise(n = n(), .groups = "drop") %>% mutate(type = "Effects")
 effects_tot <- dataset %>% group_by(year, articlestudy) %>% summarise(n = n(), .groups = "drop") %>% mutate(type = "Effects", domain = "Total")
 
 stud_plot <- bind_rows(studies, studies_tot) %>% 
   ggplot(aes(x = year, y = n, fill = domain)) +
   geom_col() +
-  facet_grid(domain ~ type, switch = "y")
+  facet_grid(domain ~ type, switch = "y") + 
+  labs(caption = "NB: The number of total samples does not equal the sum of domain-specific studies, as many samples encompass multiple domains." %>% str_wrap(50))
  
 
 eff_plot <- bind_rows(effects, effects_tot) %>% 
   ggplot(aes(x = year, y = n, fill = domain)) +
   geom_col() +
-  facet_grid(domain ~ type, switch = "y")
+  facet_grid(domain ~ type, switch = "y") +
+  labs(caption = "NB: The outlier number of Cognitive effects in 2022 is due to Qamar & Malik (2022) who assessed  personality traits across project stages (70 effect sizes)."  %>% str_wrap(50))
 
 stud_plot + eff_plot & 
   jtools::theme_apa() & 
-  theme(legend.position = "none", strip.placement = "outside") &
+  theme(legend.position = "none", strip.placement = "outside", plot.caption = element_text(hjust = 0)) &
    labs(x = "", y = "")
+```
+### Distribution over sub-domains
+
+```{r}
+# Code adapted from https://github.com/nilsreimer/ironic-effects-meta-analysis
+# Thanks to Nils Reimer!
+
+fig_dat <- dataset %>% 
+  group_by(domain, sub_dom, articlestudy) %>% 
+  summarise(n = 1, .groups = "drop_last") %>% 
+  summarise(tot = n(), .groups = "drop_last") %>%
+  mutate(share = tot/sum(tot), sub_dom = str_to_title(as.character(sub_dom))) %>% 
+  ungroup() %>% 
+    arrange(share) %>% 
+    filter(!is.na(sub_dom)) %>% 
+    mutate(
+      sub_dom = factor(sub_dom, levels = c("Other", sub_dom[sub_dom != "Other"] %>% unique()))
+    )
+
+fig_dat <- fig_dat %>% split(.$domain)
+
+create_plot <- function(data, subtitle) {
+
+data %>%
+    ggplot(., aes(x = share, y = sub_dom)) +
+  labs(subtitle = subtitle) +
+    geom_col(
+      aes(fill = if_else(sub_dom == "Other", "grey82", "black")),
+      width = 0.8
+    )  +
+    geom_text(
+      aes(
+        label = tot,
+        colour = if_else(share < 0.10, "black", "white"),
+        hjust = if_else(share < 0.10, -0.25, 1.25)
+      ),
+      size = 9/.pt
+    ) +
+    scale_x_continuous(
+      labels = scales::percent_format(accuracy = 10),
+      expand = c(0, 0)
+    ) +
+    scale_colour_identity() + 
+    scale_fill_identity() +
+    theme_minimal(base_size = 10) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(colour = "black", face = "bold"),
+      axis.text = element_text(colour = "black"),
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      panel.grid.major.x = element_line(colour = "grey92")
+    )
+
+}
+
+dem <- create_plot(fig_dat$Demographic, "Demographic")
+cog <- create_plot(fig_dat$Cognitive, "Cognitive")
+job <- create_plot(fig_dat$`Job-related`, "Job-related")
+
+
+dem + cog + job + plot_annotation(caption = glue::glue("NB: Share missing to 100% are measures that combine sub-domains\n({fmt_pct(1 - sum(fig_dat$Demographic$share))} for Demographic, very are in others.)"))
+```
+
+### Distribution over sectors & functions
+
+TK: finish with full dataset (as only Top-n can be shown)
+
+```{r}
+dataset %>% select(articlestudy, ind_sector, teams_function) %>% 
+  distinct() %>% count(ind_sector, sort = TRUE)
+
+dataset %>% select(articlestudy, ind_sector, teams_function) %>% 
+  distinct() %>% count(teams_function, sort = TRUE)
+```
+
+### Distribution over moderators
+
+Explain omissions:
+- Diversity climate & psychological safety rarely reported (< 5%) - and if so, then always as positive
+
+Explain NAs:
+- 
+
+```{r}
+
+variables <- c("art_focus", "pub_status", "interdep", "complexity", "tmt", "stud_sample",
+               "meas_type", "design", "rater", "virtuality", "auth_diff")
+
+var_names <-  tibble::tribble(
+  ~old,           ~new,           
+   "art_focus",    "Article focus",   
+   "pub_status",   "Publication status",  
+   "design",       "Design",      
+   "tmt",          "TMT",         
+   "stud_sample",  "Student sample", 
+   "meas_type",    "Diversity measure",   
+   "rater",        "Performance rater",       
+   "interdep",     "Interdependence",    
+   "complexity",   "Complexity",  
+   "virtuality",   "Virtuality",  
+   "auth_diff",    "Authority Differentiation"   
+)
+
+level_names <- tibble::tribble(
+  ~var,           ~level_old,                 ~level_new,                 
+   "art_focus",    "focal H",                  "Focal hypothesis",                 
+   "art_focus",    "auxiliary H",              "Auxiliary hypothesis",             
+   "art_focus",    "descriptive",              "Descriptive",             
+   "pub_status",   "Published",                "Published",               
+   "pub_status",   "MA Dissertation",          "MA Dissertation",         
+   "pub_status",   "Working paper/Preprint",   "Working Paper/Preprint",  
+   "pub_status",   "Conference presentation",  "Conference Presentation", 
+   "pub_status",   "PhD Dissertation",         "PhD Dissertation",        
+   "interdep",     "high",                     "High",                    
+   "interdep",     "medium",                   "Medium",                  
+   "interdep",     "low",                      "Low",                     
+   "complexity",   "high",                     "High",                    
+   "complexity",   "medium",                   "Medium",                  
+   "complexity",   "low",                      "Low",                     
+   "tmt",          "yes",                      "Yes",                     
+   "tmt",          "no",                       "No",                      
+   "stud_sample",  "yes",                      "Yes",                     
+   "stud_sample",  "no",                       "No",                      
+   "meas_type",    "Variety",                  "Variety",                 
+   "meas_type",    "Separation",               "Separation",              
+   "meas_type",    "Other",                    "Other",                   
+   "design",       "Experimental",             "Experimental",            
+   "design",       "Observational",            "Observational",           
+   "rater",        "Objective",                "Objective",               
+   "rater",        "Subjective - self",        "Subjective - Self",       
+   "rater",        "Subjective - supervisor",  "Subjective - Supervisor", 
+   "rater",        "Subjective - external",    "Subjective - External",   
+   "virtuality",   "physical",                 "Physical",                
+   "virtuality",   "hybrid-members",           "Hybrid-Members",          
+   "virtuality",   "virtual",                  "Virtual",                 
+   "auth_diff",    "high",                     "High",                    
+   "auth_diff",    "mixed",                    "Mixed",                   
+   "auth_diff",    "low",                      "Low"                     
+)
+
+
+summarize_cat_variable <- function(dataset, variable) {
+    # Domain-specific summary
+    domain_summary <- dataset %>%
+        select(articlestudy, all_of(variable), domain) %>%
+        distinct() %>%
+      rename(level = !!sym(variable)) %>% 
+        group_by(domain, level) %>%
+        summarise(count = n(), .groups = 'drop_last') %>%
+        mutate(share = count / sum(count), variable = variable)
+
+    # Total summary
+    total_summary <- dataset %>%
+        select(articlestudy, all_of(variable)) %>%
+        distinct() %>%
+            rename(level = !!sym(variable)) %>% 
+
+        group_by(level) %>%
+        summarise(count = n(), .groups = 'drop') %>%
+        mutate(share = count / sum(count), domain = "Total", variable = variable)
+    # Combine domain-specific and total summaries
+    summary <- bind_rows(domain_summary, total_summary)
+    
+    # Pivot wider and format the count and share
+    summary %>%
+        mutate(count_share =  paste0(count, " (", scales::percent(share, accuracy = .1), ")")) %>%
+        select(-count, -share) %>%
+        tidyr::pivot_wider(names_from = domain, values_from = count_share, values_fill = "0") %>%
+        select(variable, level, everything()) %>% 
+      left_join(total_summary %>% select(variable, level, total_count = count))
+}
+
+
+# Function to rename and reorder variables and levels
+apply_var_and_level_names <- function(result_table, var_names, level_names) {
+
+  # Order
+  result_table <- result_table %>%
+    arrange(match(variable, var_names$old),
+            match(paste(variable, level), paste(level_names$var, level_names$level_old)))
+  
+    # Renaming levels
+    result_table <- result_table %>%
+        left_join(level_names, by = c("variable" = "var", "level" = "level_old")) %>%
+        mutate(level = ifelse(is.na(level_new), level, level_new)) %>%
+        select(-level_new)
+
+        # Renaming variables
+    result_table <- result_table %>%
+        left_join(var_names, by = c("variable" = "old")) %>%
+        mutate(variable = ifelse(is.na(new), variable, new)) %>%
+        select(-new)
+
+    
+    result_table
+}
+
+result_table <- purrr::map_dfr(variables, ~summarize_cat_variable(dataset, .x))
+
+# Apply renaming and reordering
+final_table <- apply_var_and_level_names(result_table, var_names, level_names)
+
+final_table %>% 
+  gt(groupname_col = "variable", rowname_col = "level") %>%
+  tab_stubhead(label = "Variable") %>%
+  cols_label(total_count = "") %>% 
+  tab_spanner("Diversity domain", Demographic:`Job-related`) %>% 
+  fmt_missing(columns = everything(), missing_text = "(missing)") %>% 
+  gt_apa_style() %>% tab_style(
+        style = list(cell_text(weight = "bold")),
+        locations = cells_row_groups()
+    ) %>% 
+      tab_style(
+        style = cell_text(align = "left", indent = px(15)),
+        locations = cells_stub()
+    ) %>% 
+  tab_header("Distribution of moderator variables") %>% 
+    gt_plt_bar(column = total_count, keep_column = FALSE, color = "grey")
+  
+
+  
 ```
 
 
-
 ## Estimate 'corrected' correlations and standard errors
+
+### Effective sample sizes
+
+Largest sample sizes associated with studies that sampled outputs produced by teams (e.g., patents, Wikipedia articles and academic publications) rather than teams. Multiple of these may be created by the same team and frequently teams will overlap. Nevertheless, they provide relevant data based on large samples, so that we wanted to include them. As there is no systematic way to estimate how many independent teams these represent, the sample sizes were windsorized to the largest sample size representing independent teams. This affected x studies.
+
+```{r}
+#windsorize where OUTPUTS = TRUE
+```
+
+Many more studies relied on multiple observations of the same teams, e.g, seasons for sports-teams and years for firms. These observations are evidently dependent, so that the number of observations cannot be treated as the effective sample size. Meta-analyses in business psychology rarely address this issue explicitly, and sometimes appear to treat observations from panel data as independent - yet that can give excessive weight to studies based on a low number of independent clusters. Instead, this needs to be corrected for the auto-correlation (). This is rarely reported in the papers considered, so had to be assumed based on available data.
+
+For sports teams, we identified two sources that reported year-on-year correlations, reporting r = .72 for the season-to-season win percentage in the NBA (Landis, 2001), and r = .64 for the season-to-season goal difference in the German Bundesliga (calculated based on Ben-Ner et al., 2017). Therefore, we assumed a year-on-year correlation of .7 for repeated observations of sports teams.
+
+For year-on-year company performance, we consistently identified lower correlations, specifically:
+- Return on assets (logged): .43 (Hambrick et al., 2014)
+- Return on assets (Rickley et al., 2021): .54
+- Group performance (i.e. bonus received; Li, Shemla & Wegge, 2021): .41
+Therefore, we assumed a year-on-year correlation of .5 for repeated measures of corporate and team performance.
+
+However, for specific operational measures, the correlation is likely to be substantially different and likely higher. For instance, Pegels et al (2000) report that airline's load factor had a year-on-year correlation of .96. Therefore, we only considered the number of independent observations in these cases.
+
+After that, we calculated the effective sample size using the formula provided by 
+
+$$
+N^* = N \times \frac{1 - r}{1 + r}
+$$
+
+```{r}
+
+```
+
+
+### Correction for attenuation
+
 
 ```{r}
 
@@ -369,7 +626,7 @@ get_p_value <- function(model, coef, p_precision = .001, min_p = .0001, delta = 
   confidence_interval <- conf_int(model, vcov = "CR2", coefs = coef, level = 1 - 2 * min_p)
   
   # Identify whether we care about lower or upper bound
-  direction = if (confidence_interval$beta < 0) "CI_L" else "CI_U"
+  direction <- if (confidence_interval$beta < 0) "CI_L" else "CI_U"
   
   # Test boundary conditions
   # Estimate outside interval
@@ -414,9 +671,12 @@ confidence_intervals <- confidence_intervals %>% rowwise() %>%
 
 ## Report average effects and heterogeneity
 
-```{r}
+```{r results='hide'}
+{
 meta_summary <- summary(meta_model) %>% capture.output()
 meta_summary_intercept <- summary(meta_model_intercept)  %>% capture.output()
+}
+
 I2s <- mlm.variance.distribution(meta_model)
 
 # Calculate credibility intervals, following James Pustejovsky
@@ -424,7 +684,10 @@ I2s <- mlm.variance.distribution(meta_model)
 
 cred_upper <- confidence_intervals$beta + 1.282 * sqrt(sum(meta_model$sigma2) + confidence_intervals$SE^2)
 cred_lower <- confidence_intervals$beta - 1.282 * sqrt(sum(meta_model$sigma2) + confidence_intervals$SE^2)
+```
 
+
+```{r}
 confidence_intervals %>% 
   mutate(Domain = Coef %>% str_remove("domain") %>% str_replace("_", "-"),
          `*r*` = paste(fmt_cor(beta, 3), fmt_ci(CI_L, CI_U, 3), sigstars(p_val)),
@@ -447,6 +710,15 @@ After accounting for that, significant amount of heterogeneity remained, `r meta
 `r fmt_pct(as.numeric(I2s$result$I2[3])/100)` of the total variance in effect sizes can be attributed to study-level heterogeneity (I<sup>2</sup><sub>Level 3</sub>), while `r fmt_pct(as.numeric(I2s$result$I2[2])/100)` can be attributed to heterogeneity between the effects studied (I<sup>2</sup><sub>Level 2</sub>).
 
 The 80% credibility intervals were very wide (Table x), so that substantial positive and negative associations can be regularly expected. Therefore, moderation analyses were crucial.
+
+## Distribution of effect sizes
+
+```{r}
+
+```
+
+
+
 
 # Meta-regression
 
@@ -782,6 +1054,20 @@ with(dataset, {
 
 pool(meta_reg_models) %>% summary() %>% arrange((p.value))
 
+
+# Why not adjust SEs and then pool them?
+
+  return(data.frame(est = coef(rma_result), se = sqrt(diag(vcov(rma_result))), robust_se = sqrt(diag(se_results$vcov))))
+})
+
+# Pool the results using Rubin's Rules
+pooled_est <- colMeans(meta_regression_results$est)
+within_var <- mean(meta_regression_results$se^2)
+between_var <- var(meta_regression_results$est)
+total_var <- within_var + (1 + 1/nrow(meta_regression_results)) * between_var
+pooled_se <- sqrt(total_var)
+
+
 ```
 
 
@@ -802,7 +1088,56 @@ datasets_single <- dataset %>%
   split(.$Domain)
   
 # Complete the three datasets with 1) best estimate and 2) random draw
-    
+
+# Single mice estimate sub-optimal due to random noise - but can polyreg/pmm fuctions be called directly?
+# Alternatively, this simple hot-decking could work:
+
+
+library(cluster)
+
+# specify variables to include in hot-decking (those in metaCart and relevant other preds)
+names(dataset)
+hot_decking_vars <- c()
+
+distance_matrix <- daisy(dataset  %>% select(all_of(hot_decking_vars)), metric = "gower")
+hot_deck_imputation_partial <- function(data, distance_matrix) {
+  for (i in 1:nrow(data)) {
+    if (any(is.na(data[i,]))) {
+      for (j in which(is.na(data[i,]))) {
+        distances <- distance_matrix[i, -i]
+        # Exclude rows that also have missing in the j-th variable
+        valid_donors <- which(!is.na(data[-i, j]))
+        if (length(valid_donors) > 0) {
+          closest_complete_case_index <- valid_donors[which.min(distances[valid_donors])]
+          data[i, j] <- data[closest_complete_case_index, j]
+        }
+      }
+    }
+  }
+  return(data)
+}
+
+data_metacart_best <- dataset %>% select(all_of(hot_decking_vars))  %>% 
+    hot_deck_imputation_partial(distance_matrix)
+
+
+impute_with_random_draw <- function(dataframe) {
+  for (col in names(dataframe)) {
+    missing_indices <- which(is.na(dataframe[[col]]))
+    if (length(missing_indices) > 0) {
+      non_missing_values <- dataframe[[col]][!is.na(dataframe[[col]])]
+      if (length(non_missing_values) > 0) {
+        dataframe[[col]][missing_indices] <- sample(non_missing_values, length(missing_indices), replace = TRUE)
+      }
+    }
+  }
+  return(dataframe)
+}
+
+# Assuming 'your_dataframe' is your data frame with missing values
+data_metacart_worst <- dataset %>% select(all_of(hot_decking_vars))  %>% 
+    impute_with_random_draw()
+
 ```
 
 # Publication bias
@@ -995,5 +1330,55 @@ GRIMMER_perf <- dataset %>% filter(!is.na(M_perf)) %>% select(ID, `N teams`, Ite
 
 
 ```
+
+## Statcheck
+
+```{r}
+# Note: Replace 'dummy_statcheck_function' with actual statcheck function
+run_statcheck <- function(filename) {
+  file_path <- file.path("full_text", filename)
+  pdf_text <- pdftools::pdf_text(file_path) |>
+              paste(collapse = "") |>
+              gsub("\n", "", .)
+
+  statcheck_result <- statcheck::statcheck(pdf_text, pZeroError = FALSE, OneTailedTxt = TRUE)
+
+  if (is.null(statcheck_result)) {
+    return(NA)
+  } else {
+    return(any(statcheck_result$error))
+  }
+}
+ Initialize or read existing statcheck results
+if(file.exists("statcheck_results.csv")) {
+  statcheck_results <- read.csv("statcheck_results.csv")
+} else {
+  statcheck_results <- data.frame(ID = character(), filename = character(), statcheck_issue = logical())
+}
+
+# Assuming 'ID' is a column in your dataset
+# Filter out IDs already processed
+dataset_filtered <- dataset %>%
+  filter(!ID %in% statcheck_results$ID)
+
+# Run statcheck for unique files in the filtered dataset
+new_statcheck_results <- unique(dataset_filtered$filename) %>%
+  setNames(nm = .) %>%
+  map_df(~data.frame(ID = dataset_filtered$ID[dataset_filtered$filename == .x],
+                     filename = .x, 
+                     statcheck_issue = run_statcheck(.x)))
+
+# Append new results to existing statcheck results and save
+final_statcheck_results <- bind_rows(statcheck_results, new_statcheck_results)
+write.csv(final_statcheck_results, "statcheck_results.csv", row.names = FALSE)
+
+# Merge the statcheck results with the original dataset
+dataset <- dataset %>%
+  left_join(final_statcheck_results, by = "ID")
+
+```
+
+
+## Retractions
 
 
