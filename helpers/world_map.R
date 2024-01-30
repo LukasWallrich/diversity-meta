@@ -92,7 +92,8 @@ create_world_map <- function(countries, counts, count_label, scale_start = 1) {
         ~country,     ~lat,      ~long,
         "Hong Kong", 22.30271, 114.177216,
         "Singapore", 1.283333, 103.833333
-      )
+      ),
+      by = "country"
     ) %>%
     st_as_sf(coords = c("long", "lat"), crs = st_crs(world_sf))
 

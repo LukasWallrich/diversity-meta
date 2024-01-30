@@ -31,25 +31,39 @@ source("helpers/helpers.R")
 
 ```{r intro, include=FALSE}
 # Read M/SD as character to retain trailing 0s for GRIM/GRIMMER
-col_types_en <- rep("guess", 56)
-col_types_en[c(33:35, 42:44)] <- "text"
+col_types_en <- c(rep("?", 56), rep("_", 8))
+col_types_en[c(3, 33:35, 42:45)] <- "c"
+col_types_en <- paste0(col_types_en, collapse = "")
+
+googlesheets4::gs4_deauth()
+effect_sizes_en <- googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1pEYZUZvFr8qmULT077y932BUShpJvhs-asRuyyiBKlQ/edit#gid=1628922200", 
+                                             sheet = "Unified Coding",
+                                             skip = 2,
+                                             col_types = col_types_en,
+                                              na = c("#N/A", "NA", "")) %>% 
+                              filter(!is.na(ID)) %>% 
+  mutate(ID = str_remove(ID, "\\.0$"))
+
+col_types_nen <- c(rep("?", 59), rep("_", 8))
+col_types_nen[c(36:38, 45:48)] <- "c"
+col_types_nen <- paste0(col_types_nen, collapse = "")
+
+effect_sizes_n_en <- googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1XCjlC3u7Ws2KCjaRQ1R0VuU0mLQ5mHVipmzuGtivLCs/edit#gid=1553069535", 
+                                             sheet = "Unified Coding",
+                                             skip = 2,
+                                             col_types = col_types_nen,
+                                              na = c("#N/A", "NA", "")) %>% 
+                              filter(!is.na(ID)) %>%  filter(is.na(Excluded) | Excluded != "yes") %>% 
+    mutate(ID = str_remove(ID, "\\.0$"))
 
 
-effect_sizes_en <- read_excel("data/english_coding-WIP.xlsx", 
-                              range = cell_limits(c(3, 1), c(NA, 56),
-                                                  sheet = "Unified Coding"),
-                              na = c("#N/A", "NA"),
-                              col_types = col_types_en) %>% filter(!is.na(ID))
-
-col_types_nen <- rep("guess", 59)
-col_types_nen[c(36:38, 45:47)] <- "text"
-
-effect_sizes_n_en <- read_excel("data/non-English_coding-WIP.xlsx",
-                                range = cell_limits(c(3, 1), c(NA, 59),
-                                                  sheet = "Unified Coding"),
-                                na = c("#N/A", "NA"),
-                                col_types = col_types_nen) %>% filter(!is.na(ID)) %>%
-  filter(is.na(Excluded) | Excluded != "yes")
+# effect_sizes_n_en <- read_excel("data/non-English_coding-WIP.xlsx",
+#                                 range = cell_limits(c(3, 1), c(NA, 59),
+#                                                   sheet = "Unified Coding"),
+#                                 na = c("#N/A", "NA"),
+#                                 col_types = col_types_nen) %>% filter(!is.na(ID)) %>%
+#   filter(is.na(Excluded) | Excluded != "yes") %>% 
+#   mutate(ID = str_remove(ID, "\\.0$"))
 
 
 #effect_sizes_other <- read_excel("data/english_coding-WIP.xlsx")
@@ -67,7 +81,7 @@ rename_vec_en <- c(
   id = "ID",
   effect_id = "effect_id",
   #excl = "Excluded",
-  NULL = "Title",
+  title = "Title",
   author_year = "Author (Year)",
   NULL = "File", # Only contains "PDF", not the link
   file = "File URL",
@@ -505,7 +519,7 @@ Explain NAs:
 
 ```{r}
 
-variables <- c("art_focus", "pub_status", "interdep", "complexity", "tmt", "stud_sample",
+variables <- c("art_focus", "pub_status", "interdep", "complexity", "longevity", "tmt", "stud_sample",
                "meas_type", "design", "rater", "virtuality", "auth_diff", "language")
 
 var_names <-  tibble::tribble(
@@ -521,6 +535,7 @@ var_names <-  tibble::tribble(
    "interdep",     "Interdependence",    
    "complexity",   "Complexity",  
    "virtuality",   "Virtuality",  
+   "longevity",    "Longevity",
    "auth_diff",    "Authority Differentiation"   
 )
 
@@ -569,7 +584,13 @@ level_names <- tibble::tribble(
    "language",  "japanese",    "Japanese",   
    "language",  "korean",      "Korean",     
    "language",  "portuguese",  "Portuguese", 
-   "language",  "spanish",     "Spanish"
+   "language",  "spanish",     "Spanish",
+   "longevity",  "hours",    "Hours",   
+   "longevity",  "days",     "Days",    
+   "longevity",  "weeks",    "Weeks",   
+   "longevity",  "months",   "Months",  
+   "longevity",  "years",    "Years",
+   "longevity",  "stable",   "Stable"  
 )
 
 
@@ -859,12 +880,16 @@ meta_model_intercept <- rma.mv(r_adj ~ 1 + domain,
                     V = V,
                     random = ~ 1 | articlestudy/effect_id,
                     data = dataset,
+                    test="t",
+                    dfs="contain",
                     sparse = TRUE)
 
 meta_model <- rma.mv(r_adj ~ 0 + domain,
                     V = V,
                     random = ~ 1 | articlestudy/effect_id,
                     data = dataset,
+                    test="t",
+                    dfs="contain",
                     sparse = TRUE)
 
 
@@ -960,7 +985,7 @@ confidence_intervals %>%
 
 RQ1a: Is the link between diversity and team performance insubstantial (i.e., |r| < .1)? Does this differ between the dimensions of diversity?
 
-Average effects significantly differed between diversity domains, `r meta_summary_intercept[str_detect(meta_summary_intercept, "^QM")]` (though not substantially so? TK - run equivalence test for this?)
+Average effects significantly differed between diversity domains, `r meta_summary_intercept[str_detect(meta_summary_intercept, "^F\\(")]` (though not substantially so? TK - run equivalence test for this?)
 After accounting for that, significant amount of heterogeneity remained, `r meta_summary[str_detect(meta_summary, "^QE")]`
 
 `r fmt_pct(as.numeric(I2s$result$I2[3])/100)` of the total variance in effect sizes can be attributed to study-level heterogeneity (I<sup>2</sup><sub>Level 3</sub>), while `r fmt_pct(as.numeric(I2s$result$I2[2])/100)` can be attributed to heterogeneity between the effects studied (I<sup>2</sup><sub>Level 2</sub>).
@@ -969,7 +994,7 @@ The 80% credibility intervals were very wide (Table x), so that substantial posi
 
 ## Distribution of effect sizes
 
-```{r}
+```{r fig.height=12}
 
 # Get confidence intervals based on the adjusted standard errors (for effective sample size and unreliability)
 get_cis <- function(r_adj, se_adj, conf.level = 0.95) {
@@ -1005,18 +1030,87 @@ dataset_spec <- dataset %>%
     ci_low > 0 ~ "darkgreen"
   ))
 
-  #plot_a <- 
+# Simplified function for creating the specification curve-type plot
+# Derived from https://github.com/masurp/specr
 
-dataset_spec %>% 
+  plot_a <- dataset_spec %>% 
     ggplot(aes(x = specification, y = r_adj, ymin = ci_low, ymax = ci_high)) +
     geom_pointrange(aes(color = color), alpha = 0.5, size = 0.6, fatten = 1) +
     theme_minimal() +
     scale_color_identity() +
     theme(axis.line = element_line(size = 0.5), legend.position = "none",
           panel.spacing = unit(0.75, "lines"), axis.text = element_text(color = "black")) +
-    labs(x = "Effect sizes (ranked)", y = "r (adjusted)") +
+    labs(x = "", y = "r (adjusted)") +
   geom_hline(yintercept = 0)
 
+  choices <- c("Domain" = "domain", "Top team" = "tmt", "Students" = "stud_sample",
+               "Interdependence" = "interdep", "Complexity" = "complexity", "Longevity" = "longevity",  
+               "Measure" = "meas_type", "Rater" = "rater", "Hypothesis" = "art_focus")
+  
+  rev_choices <- setNames(names(choices), choices)
+  
+  levels_replace <- level_names %>% select(-var) %>% distinct() %>% 
+    {setNames(.$level_new, .$level_old)}
+  
+ levels_replace <- tibble::tribble(
+  ~level_old,                 ~level_new,                 
+   "focal H",                  "Focal hypothesis",        
+   "auxiliary H",              "Auxiliary hypothesis",    
+   "descriptive",              "Descriptive",             
+   "high",                     "High",                    
+   "medium",                   "Medium",                  
+   "low",                      "Low",                     
+   "yes",                      "Yes",                     
+   "no",                       "No",                      
+   "Variety",                  "Variety",                 
+   "Separation",               "Separation",              
+   "Other",                    "Other",                   
+   "Objective",                "Objective",               
+   "Subjective - self",        "Subjective - Self",       
+   "Subjective - supervisor",  "Subjective - Supervisor", 
+   "Subjective - external",    "Subjective - External",   
+   "hours",                    "Hours",                   
+   "days",                     "Days",                    
+   "weeks",                    "Weeks",                   
+   "months",                   "Months",                  
+   "years",                    "Years",                   
+   "stable",                   "Stable",
+   "Demographic",              "Demographic", 
+   "Cognitive",                "Cognitive",   
+   "Job-related",              "Job-Related"
+) %>% {
+  setNames(.$level_new, .$level_old)
+}
+  
+  plot_b <- dataset_spec %>%
+    mutate(sub_dom = fct_lump_n(sub_dom, 5)) %>% 
+    tidyr::gather(key = "key", value = "value", choices) %>%
+    mutate(key = coalesce(rev_choices[key], key),
+           value = coalesce(levels_replace[value], value),
+           key = factor(key, levels = rev_choices),
+           value = factor(value, levels = levels_replace) %>% fct_rev()) %>% 
+    filter(!is.na(value)) %>% 
+ggplot(aes(x = specification, y = value, color = color)) +
+    geom_point(shape = 124, size = 3.35, alpha = .5) +
+    scale_color_identity() +
+    theme_minimal() +
+    facet_grid(key ~ ., scales = "free_y", space = "free_y", switch = "y") +
+    theme(axis.line = element_line(size = 0.5), 
+          legend.position = "none",
+          panel.spacing = unit(0.75, "lines"), 
+          axis.text = element_text(color = "black"),
+          strip.text.y.left = element_text(angle = 90, face="bold"),
+          strip.background = element_rect(fill="lightblue", colour="black",size=1),
+          strip.placement = "outside",
+          strip.text.x = element_blank()) +
+    labs(x = "Effect sizes (ranked)", y = "")
+
+
+  # Combine both plots
+  p <- plot_a / plot_b +
+    plot_layout(heights = c(1, 4))
+
+  p
 ```
 
 
@@ -1054,35 +1148,45 @@ dataset <- dataset %>%
   left_join(hofstede, by = c("hofstede_match" = "country")) %>% 
   select(-hofstede_match)
 
-citation_counts <- read_excel("data/citation_data_en.xlsx") %>% distinct()
+citation_counts <- bind_rows(read_excel("data/citation_data_en.xlsx") %>% distinct(),
+                             read_excel("data/citation_data_nen.xlsx") %>% distinct()) %>% 
+  mutate(citation_count = coalesce(citation_count, citations))
+                             
 
 dataset <- dataset %>% 
   left_join(
     citation_counts %>% select(id = ID, citation_count)
   )
 
-  
-dataset <- dataset %>%
-    mutate(year_merged = coalesce(ifelse(str_detect(year_coll, "–|-"),
-                              sapply(str_split(year_coll, "–|-"), 
-                                     function(x) mean(as.numeric(x))),
-                              as.numeric(year_coll)),
-                              year))
+# NAs in citation count indicate that these entries could not be found on Google Scholar - thus they have 0 Google Scholar citations.
+dataset <- dataset %>% 
+  mutate(citation_count = replace_na(citation_count, 0))
 
+
+if (is.list(dataset$year_coll)) {
+  dataset <- dataset %>%
+      mutate(year_coll = null_to_NA(year_coll))
+} 
+  dataset <- dataset %>%
+      mutate(year_coll_mean = ifelse(str_detect(year_coll, "–|-"),
+                                sapply(str_split(year_coll, "–|-"), 
+                                       function(x) mean(as.numeric(x))),
+                                as.numeric(year_coll)),
+             year_merged = coalesce(year_coll_mean,
+                                year))
+  
 sum(is.na(dataset$year_merged))
 
-
-# Check for redundancy ??? TKlater - not preregistered, so needs to be conservative
 ```
 
 ## Impute data
 
-- Exclude variables with > 95% missing (psych safety and diversity climate)
-- TK: how to deal with MNAR variables (virtuality, and likely authority diff)?
+- Exclude variables with > 95% missing (psych safety and diversity climate) - no variance based on criteria either
+- How to deal with MNAR variables (virtuality and authority diff)? Would require many post-hoc choices - so in spirit of RR, omit?
 
 ```{r}
 
-mi_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "teams_function", "country", "n_teams", "stud_sample", "tmt", "domain", "sub_dom", "meas_type", "criterion", "rater", "interdep", "complexity", "longevity", "virtuality", "auth_diff", "power_distance", "collectivism", "year_merged")
+mi_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "team_function", "country", "n_teams", "stud_sample", "tmt", "domain", "sub_dom", "meas_type", "criterion", "rater", "interdep", "complexity", "longevity", "power_distance", "collectivism", "year_merged", "citation_count")
 
 convert_to_factor <- function(x) {
   if (is.character(x)) {
@@ -1105,18 +1209,22 @@ imp <- mice(dataset, maxit=0, seed = 1526)
 
 
 # Set variables of interest to be predicted by each other, all others ignored
-# TK: Get this to work without quickpred? Somewhat too atheoretical and ignoring multivariate context?
-
 preds <- imp$predictorMatrix
 preds[] <- 0  
-pred_matrix <- dataset %>% select(all_of(mi_vars)) %>% quickpred_ext()
-preds[rownames(pred_matrix), colnames(pred_matrix)] <- pred_matrix
+# pred_matrix <- dataset %>% select(all_of(mi_vars)) %>% quickpred_ext() <- could reduce the matrix like this
+# preds[rownames(pred_matrix), colnames(pred_matrix)] <- pred_matrix
+preds[mi_vars, mi_vars] <- 1
+
+# Use other model variables in MI model
+preds[mi_vars, "r_adj"] <- 1
+preds[mi_vars, "se"] <- 1
+
 
 
 # Standard methods per variable type are generally good (polyreg for factors, polr for ordered, pmm for continuous)  
 # but polyreg does not work well with many factor levels - so these set to pmm
 methods <- imp$method
-methods[c("ind_sector", "teams_function", "country", "sub_dom")] <- "pmm"
+methods[c("ind_sector", "team_function", "country", "sub_dom")] <- "pmm"
 methods[!names(methods) %in% mi_vars] <- ""
 
 # Van Buren - set m to average share missing
@@ -1215,36 +1323,220 @@ Citations:
 
 ```{r}
 
-moderators <- c("complexity", "interdep", "year_merged", "collectivism", "longevity", "meas_type", "rater", "design", "art_focus")
+# See https://www.jepusto.com/rve-meta-analysis-with-mi/#
 
-      dataset$domain <- dataset$domain %>% relevel(ref = "Demographic")
+cat_moderators <- c("complexity", "interdep", "longevity", "meas_type", "rater", "design", "art_focus")
+cont_moderator <- c("year_merged", "collectivism")
 
-mod <- with(dataset, {
+
+single_moderator_tests <- map(cat_moderators, \(moderator) {
+  message("Now estimating ", moderator)
+no_levels <- dataset[[moderator]] %>% unique() %>% na.omit() %>% length()
+            browser()
+mod <- with(imp, {
                           V <-  impute_covariance_matrix(vi = var_adj,
                                    cluster = articlestudy,
                                    r = rho)
-                          
-  interdep <- factor(interdep, ordered = FALSE)
+  assign(moderator, factor(get(moderator), ordered = FALSE))                         
   
-  mod <- rma.mv(r_adj ~ 0 + interdep,
+  mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
                               V = V,
                               random = ~ 1 | articlestudy/effect_id,
+                              test = "t",
+                              dfs = "contain",
                               sparse = TRUE)
   
-  mod_domains <- rma.mv(r_adj ~ 0 + domain + domain:interdep,
+  mod_domains <- rma.mv(as.formula(paste0("r_adj ~ 0 + domain + domain:", moderator)),
                               V = V,
                               random = ~ 1 | articlestudy/effect_id,
+                              test = "t",
+                              dfs = "contain",
                               sparse = TRUE)
   
-  
+ list(mod = mod,
+      mod_interact = mod_domains,
+      robu_main = coef_test(mod, vcov="CR2"),
+      robu_interact = coef_test(mod_domains, vcov="CR2"))
+ 
 })
 
+# Pool coef_tests as per https://www.jepusto.com/mi-with-clubsandwich/
 
-domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
-                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus
+robust_across <- 
+  map(mod$analyses, "robu_main")%>%
+  
+  # add coefficient names as a column
+  lapply(function(x) {
+    x$coef <- row.names(x)
+    x
+  }) %>%
+  bind_rows() %>%
+  as.data.frame() %>%
+  
+  # summarize by coefficient
+  group_by(coef) %>%
+  summarise(
+    m = n(),
+    B = var(beta),
+    beta_bar = mean(beta),
+    V_bar = mean(SE^2),
+    eta_bar = mean(df_Satt)
+  ) %>%
+  
+  mutate(
+    
+    # calculate intermediate quantities to get df
+    V_total = V_bar + B * (m + 1) / m,
+    gamma = ((m + 1) / m) * B / V_total,
+    df_m = (m - 1) / gamma^2,
+    df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
+    df = 1 / (1 / df_m + 1 / df_obs),
+    
+    # calculate summary quantities for output
+    se = sqrt(V_total),
+    t = beta_bar / se,
+    p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
+    crit = qt(0.975, df = df),
+    lo95 = beta_bar - se * crit,
+    hi95 = beta_bar + se * crit
+  ) %>%
+  select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
 
+robust_domain <- 
+  map(mod$analyses, "robu_interact")%>%
+  
+  # add coefficient names as a column
+  lapply(function(x) {
+    x$coef <- row.names(x)
+    x
+  }) %>%
+  bind_rows() %>%
+  as.data.frame() %>%
+  
+  # summarize by coefficient
+  group_by(coef) %>%
+  summarise(
+    m = n(),
+    B = var(beta),
+    beta_bar = mean(beta),
+    V_bar = mean(SE^2),
+    eta_bar = mean(df_Satt)
+  ) %>%
+  
+  mutate(
+    
+    # calculate intermediate quantities to get df
+    V_total = V_bar + B * (m + 1) / m,
+    gamma = ((m + 1) / m) * B / V_total,
+    df_m = (m - 1) / gamma^2,
+    df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
+    df = 1 / (1 / df_m + 1 / df_obs),
+    
+    # calculate summary quantities for output
+    se = sqrt(V_total),
+    t = beta_bar / se,
+    p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
+    crit = qt(0.975, df = df),
+    lo95 = beta_bar - se * crit,
+    hi95 = beta_bar + se * crit
+  ) %>%
+  select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
+
+# Get coefficients
+coefs <- map(mod$analyses, "mod") %>% map(coef)
+
+# Get CR2 variance-covariance matrices
+vcovs <- map(mod$analyses, "mod") %>%  map(vcovCR, type = "CR2")
+
+# Get denominator df from complete-data F-tests
+q <- no_levels - 1
+dfs <- 
+  map(mod$analyses, "mod") %>% 
+  map_dfr(Wald_test, vcov = "CR2", constraints = constrain_zero(2:(no_levels)), test = "HTZ") %>%
+  mutate(
+    eta = df_denom + (q - 1)
+  )
+eta <- mean(dfs$eta)
+
+# Combine imputed results
+# These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
+res <- MIcombine(results = coefs, variances = vcovs)
+res$coefficients
+
+res_tibble <- tibble()
+
+# Test of moderator overall
+Cmat <- constrain_zero(2:(no_levels), coefs = res$coefficients)
+Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
+Fstat <- (eta - q + 1) / (eta * q) * as.numeric(Q)
+p_val <- pf(Fstat, df1 = q, df2 = eta - q + 1, lower.tail = FALSE)
+res_tibble <- bind_rows(res_tibble, data.frame(domain = "Overall", Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val))
+
+# Test of domains
+# Get coefficients
+coefs <- map(mod$analyses, "mod_interact") %>% map(coef)
+
+# Get CR2 variance-covariance matrices
+vcovs <- map(mod$analyses, "mod_interact") %>%  map(vcovCR, type = "CR2")
+
+# Get denominator df from complete-data F-tests
+q <- no_levels - 1
+
+eta_domain <- numeric()
+
+for (i in 1:3) {
+  dfs <- 
+  map(mod$analyses, "mod_interact") %>% 
+  map_dfr(Wald_test, vcov = "CR2", constraints = constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3)), test = "HTZ") %>%
+  mutate(
+    eta = df_denom + (q - 1)
+  )
+eta_domain[i] <- mean(dfs$eta)
+}
+
+
+# Combine imputed results
+# These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
+res <- MIcombine(results = coefs, variances = vcovs)
+res$coefficients
+
+
+for (i in 1:3) {
+# Test of moderator overall
+Cmat <- constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3), coefs = res$coefficients)
+Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
+Fstat <- (eta - q + 1) / (eta * q) * as.numeric(Q)
+p_val <- pf(Fstat, df1 = q, df2 = eta - q + 1, lower.tail = FALSE)
+res_tibble <- bind_rows(res_tibble, data.frame(domain = names(res$coefficients)[((no_levels * 1:3)-(3-i))[1]], Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val))
+}
+
+list(list(moderator_test = res_tibble, robu_averages = robust_across, robu_domains = robust_domain)) %>% set_names(moderator)
+})
 ```
 
+```{r}
+mod <- with(imp, {V <-  impute_covariance_matrix(vi = var_adj,
+                                   cluster = articlestudy,
+                                   r = rho)
+  
+  mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              test = "t",
+                              dfs = "contain",
+                              sparse = TRUE)
+
+  mod_interact <- rma.mv(as.formula(paste0("r_adj ~ ", domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
+                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus)),
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              test = "t",
+                              dfs = "contain",
+                              sparse = TRUE)
+
+  
+
+```
 
 
 
