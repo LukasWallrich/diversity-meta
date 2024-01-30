@@ -971,6 +971,52 @@ The 80% credibility intervals were very wide (Table x), so that substantial posi
 
 ```{r}
 
+# Get confidence intervals based on the adjusted standard errors (for effective sample size and unreliability)
+get_cis <- function(r_adj, se_adj, conf.level = 0.95) {
+  
+  # Reduce extreme estimates to those that would be rounded
+  if (r_adj == 1) r_adj <- .995
+  if (r_adj == -1) r_adj <- -.995
+
+    # Fisher's r to z transformation
+  z <- 0.5 * log((1 + r_adj) / (1 - r_adj))
+  
+  alpha <- 1 - conf.level
+  z.critical <- qnorm(1 - alpha / 2)
+  
+  # Confidence interval calculation
+  ci.lower <- z - z.critical * se_adj
+  ci.upper <- z + z.critical * se_adj
+  
+  # Transforming back to r
+  ci.lower.r <- (exp(2 * ci.lower) - 1) / (exp(2 * ci.lower) + 1)
+  ci.upper.r <- (exp(2 * ci.upper) - 1) / (exp(2 * ci.upper) + 1)
+  
+  list(ci_low = ci.lower.r, ci_high = ci.upper.r)
+}
+
+dataset_spec <- dataset %>%
+  mutate(ci = pmap(list(r_adj, se), get_cis)) %>%
+  mutate(ci_low = map_dbl(ci, 1), ci_high = map_dbl(ci, 2)) %>% 
+  select(-ci) %>% arrange(r_adj) %>% rowid_to_column(var = "specification") %>% 
+  mutate(color = case_when(
+    ci_high < 0 ~ "darkred",
+    ci_low <= 0 ~ "darkgrey",
+    ci_low > 0 ~ "darkgreen"
+  ))
+
+  #plot_a <- 
+
+dataset_spec %>% 
+    ggplot(aes(x = specification, y = r_adj, ymin = ci_low, ymax = ci_high)) +
+    geom_pointrange(aes(color = color), alpha = 0.5, size = 0.6, fatten = 1) +
+    theme_minimal() +
+    scale_color_identity() +
+    theme(axis.line = element_line(size = 0.5), legend.position = "none",
+          panel.spacing = unit(0.75, "lines"), axis.text = element_text(color = "black")) +
+    labs(x = "Effect sizes (ranked)", y = "r (adjusted)") +
+  geom_hline(yintercept = 0)
+
 ```
 
 
