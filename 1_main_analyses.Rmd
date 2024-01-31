@@ -536,7 +536,10 @@ var_names <-  tibble::tribble(
    "complexity",   "Complexity",  
    "virtuality",   "Virtuality",  
    "longevity",    "Longevity",
-   "auth_diff",    "Authority Differentiation"   
+   "auth_diff",    "Authority Differentiation",   
+   "collectivism",  "Collectivism",   
+   "power_distance",    "Power distance",   
+   "year_merged",    "Year of data collection"   
 )
 
 level_names <- tibble::tribble(
@@ -1144,7 +1147,7 @@ hofstede_map <- c(
 #TK: consider adding regional composites for few-country samples?
 
 dataset <- dataset %>% 
-  mutate(hofstede_match = coalesce(hofstede_map[country], country)) %>% 
+  mutate(hofstede_match = ifelse(country %in% names(hofstede_map), hofstede_map[country %>% as.character()], country %>% as.character()) %>%  factor()) %>% 
   left_join(hofstede, by = c("hofstede_match" = "country")) %>% 
   select(-hofstede_match)
 
@@ -1321,220 +1324,469 @@ H9: Studies where the link between diversity and performance is the focal hypoth
 Citations:
 - Correlated with ES? [Cannot meaningfully assess signifiance due to prevalent repeated measures]
 
-```{r}
+### With observed data
 
+```{r}
 # See https://www.jepusto.com/rve-meta-analysis-with-mi/#
 
 cat_moderators <- c("complexity", "interdep", "longevity", "meas_type", "rater", "design", "art_focus")
-cont_moderator <- c("year_merged", "collectivism")
+cont_moderator <- c("year_merged", "collectivism", "power_distance")
 
-
-single_moderator_tests <- map(cat_moderators, \(moderator) {
+single_cat_moderator_tests <- cat_moderators %>% set_names() %>% map(\(moderator) {
   message("Now estimating ", moderator)
-no_levels <- dataset[[moderator]] %>% unique() %>% na.omit() %>% length()
-            browser()
-mod <- with(imp, {
-                          V <-  impute_covariance_matrix(vi = var_adj,
+  
+  no_levels <- dataset[[moderator]] %>%
+    unique() %>%
+    na.omit() %>%
+    length()
+  
+  V <- with(dataset, 
+          impute_covariance_matrix(vi = var_adj,
                                    cluster = articlestudy,
-                                   r = rho)
-  assign(moderator, factor(get(moderator), ordered = FALSE))                         
+                                   r = rho))
   
-  mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
-                              V = V,
-                              random = ~ 1 | articlestudy/effect_id,
-                              test = "t",
-                              dfs = "contain",
-                              sparse = TRUE)
+  mod <- {
+    V <- V # Assuming var_adj is the observed covariance matrix
+    dataset[[moderator]] <- factor(dataset[[moderator]], ordered = FALSE)
+
+    mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
+      V = V,
+      random = ~ 1 | articlestudy / effect_id,
+      test = "t",
+      dfs = "contain",
+      data = dataset,
+      sparse = TRUE
+    )
+
+    mod_domains <- rma.mv(as.formula(paste0("r_adj ~ 0 + domain + domain:", moderator)),
+      V = V,
+      random = ~ 1 | articlestudy / effect_id,
+      test = "t",
+      dfs = "contain",
+      data = dataset,
+      sparse = TRUE
+    )
+
+    list(
+      mod = mod,
+      mod_domains = mod_domains
+    )
+  }
   
-  mod_domains <- rma.mv(as.formula(paste0("r_adj ~ 0 + domain + domain:", moderator)),
-                              V = V,
-                              random = ~ 1 | articlestudy/effect_id,
-                              test = "t",
-                              dfs = "contain",
-                              sparse = TRUE)
+  robust_across <- coef_test(mod$mod, vcov = "CR2")
+  robust_domain <- coef_test(mod$mod_domains, vcov = "CR2")
+
+  # Tests for each moderator and domain
   
- list(mod = mod,
-      mod_interact = mod_domains,
-      robu_main = coef_test(mod, vcov="CR2"),
-      robu_interact = coef_test(mod_domains, vcov="CR2"))
+
+  # Test of moderator overall
+  res_tibble <- Wald_test(mod$mod, vcov = "CR2", constrain_zero(2:nrow(robust_across), coef(mod$mod))) %>% mutate(domain = "Overall")
+
+  # Test of domains
+
+  for (i in 1:3) {
+      # Test of moderator overall
+    res_tibble <- bind_rows(res_tibble, Wald_test(mod$mod_domains, vcov = "CR2", constrain_equal(seq(i, no_levels * 3, by = 3), coef(mod$mod_domains))) %>% 
+        mutate(domain = names(coef(mod$mod_domains))[i]))
+  }
+  
+  list(moderator_test = res_tibble, robu_averages = robust_across, robu_domains = robust_domain, meta_models = mod)
+})
+
+
+single_cont_moderator_tests <- cont_moderator %>% set_names() %>% map(\(moderator) {
+  message("Now estimating ", moderator)
+  
  
+  V <- with(dataset, 
+          impute_covariance_matrix(vi = var_adj,
+                                   cluster = articlestudy,
+                                   r = rho))
+  
+  mod <- {
+    V <- V # Assuming var_adj is the observed covariance matrix
+
+    mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
+      V = V,
+      random = ~ 1 | articlestudy / effect_id,
+      test = "t",
+      dfs = "contain",
+      data = dataset,
+      sparse = TRUE
+    )
+
+    mod_domains <- rma.mv(as.formula(paste0("r_adj ~ 0 + domain + domain:", moderator)),
+      V = V,
+      random = ~ 1 | articlestudy / effect_id,
+      test = "t",
+      dfs = "contain",
+      data = dataset,
+      sparse = TRUE
+    )
+
+    list(
+      mod = mod,
+      mod_domains = mod_domains
+    )
+  }
+  
+  list(robust_across = coef_test(mod$mod, vcov = "CR2"),
+  robust_domain = coef_test(mod$mod_domains, vcov = "CR2"),
+  meta_models = mod)
 })
 
-# Pool coef_tests as per https://www.jepusto.com/mi-with-clubsandwich/
+ks <- single_cat_moderator_tests %>% map_dbl(~.x$meta_models$mod_domains$k) %>% tibble(moderator = names(single_cat_moderator_tests), k = .)
 
-robust_across <- 
-  map(mod$analyses, "robu_main")%>%
+ks <- bind_rows(ks, 
+                single_cont_moderator_tests %>% map_dbl(~.x$meta_models$mod_domains$k) %>% tibble(moderator = names(single_cont_moderator_tests), k = .))
+
+ks <- ks %>% rowwise() %>% mutate(moderator = var_names$new[var_names$old == moderator])
+
+cat_summary <- single_cat_moderator_tests %>% map_dfr("moderator_test", .id = "moderator") %>%  mutate(domain = str_remove(domain, "domain"))
+
+cont_summary <- bind_rows(
+  single_cont_moderator_tests %>% map_dfr("robust_across", .id = "moderator") %>% as_tibble() %>%  mutate(domain = "Overall") %>% filter(Coef != "intrcpt"),
+  single_cont_moderator_tests %>% map_dfr("robust_domain", .id = "moderator") %>% as_tibble() %>%  filter(str_detect(Coef, ":")) %>% 
+    mutate(domain = str_extract(Coef, ".*:") %>% str_remove("domain") %>% str_remove(":"))
+)
+
+
+
+bind_rows(cat_summary %>% select(moderator, p_val, domain),
+          cont_summary %>% select(moderator, p_val = p_Satt, domain)) %>% 
+  rowwise() %>% 
+  mutate(p_fmt = paste(fmt_p(p_val, equal_sign = FALSE), sigstars(p_val)),
+         moderator = var_names$new[var_names$old == moderator]) %>%
+    select(-p_val) %>% 
+  spread(domain, p_fmt) %>% 
+  left_join(ks) %>% 
+  select(Moderator = moderator, k, Overall, Demographic, Cognitive, `Job-related`) %>% gt::gt() %>% 
+  tab_header(title = "Univariate moderator tests") %>% 
+  tab_spanner(md("Significance tests (*p*-values)"), Overall:`Job-related`)
+```
+
+
+```{r}
+single_moderator_tests <- cat_moderators %>% set_names() %>% map(\(moderator) {
+  message("Now estimating ", moderator)
   
-  # add coefficient names as a column
-  lapply(function(x) {
-    x$coef <- row.names(x)
-    x
-  }) %>%
-  bind_rows() %>%
-  as.data.frame() %>%
-  
-  # summarize by coefficient
-  group_by(coef) %>%
-  summarise(
-    m = n(),
-    B = var(beta),
-    beta_bar = mean(beta),
-    V_bar = mean(SE^2),
-    eta_bar = mean(df_Satt)
-  ) %>%
-  
-  mutate(
-    
-    # calculate intermediate quantities to get df
-    V_total = V_bar + B * (m + 1) / m,
-    gamma = ((m + 1) / m) * B / V_total,
-    df_m = (m - 1) / gamma^2,
-    df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
-    df = 1 / (1 / df_m + 1 / df_obs),
-    
-    # calculate summary quantities for output
-    se = sqrt(V_total),
-    t = beta_bar / se,
-    p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
-    crit = qt(0.975, df = df),
-    lo95 = beta_bar - se * crit,
-    hi95 = beta_bar + se * crit
-  ) %>%
-  select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
+  no_levels <- dataset[[moderator]] %>%
+    unique() %>%
+    na.omit() %>%
+    length()
+  mod <- with(imp, {
+    V <- impute_covariance_matrix(
+      vi = var_adj,
+      cluster = articlestudy,
+      r = rho
+    )
+    assign(moderator, factor(get(moderator), ordered = FALSE))
 
-robust_domain <- 
-  map(mod$analyses, "robu_interact")%>%
-  
-  # add coefficient names as a column
-  lapply(function(x) {
-    x$coef <- row.names(x)
-    x
-  }) %>%
-  bind_rows() %>%
-  as.data.frame() %>%
-  
-  # summarize by coefficient
-  group_by(coef) %>%
-  summarise(
-    m = n(),
-    B = var(beta),
-    beta_bar = mean(beta),
-    V_bar = mean(SE^2),
-    eta_bar = mean(df_Satt)
-  ) %>%
-  
-  mutate(
-    
-    # calculate intermediate quantities to get df
-    V_total = V_bar + B * (m + 1) / m,
-    gamma = ((m + 1) / m) * B / V_total,
-    df_m = (m - 1) / gamma^2,
-    df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
-    df = 1 / (1 / df_m + 1 / df_obs),
-    
-    # calculate summary quantities for output
-    se = sqrt(V_total),
-    t = beta_bar / se,
-    p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
-    crit = qt(0.975, df = df),
-    lo95 = beta_bar - se * crit,
-    hi95 = beta_bar + se * crit
-  ) %>%
-  select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
+    mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
+      V = V,
+      random = ~ 1 | articlestudy / effect_id,
+      test = "t",
+      dfs = "contain",
+      sparse = TRUE
+    )
 
-# Get coefficients
-coefs <- map(mod$analyses, "mod") %>% map(coef)
+    mod_domains <- rma.mv(as.formula(paste0("r_adj ~ 0 + domain + domain:", moderator)),
+      V = V,
+      random = ~ 1 | articlestudy / effect_id,
+      test = "t",
+      dfs = "contain",
+      sparse = TRUE
+    )
 
-# Get CR2 variance-covariance matrices
-vcovs <- map(mod$analyses, "mod") %>%  map(vcovCR, type = "CR2")
+    list(
+      mod = mod,
+      mod_interact = mod_domains,
+      robu_main = coef_test(mod, vcov = "CR2"),
+      robu_interact = coef_test(mod_domains, vcov = "CR2")
+    )
+  })
 
-# Get denominator df from complete-data F-tests
-q <- no_levels - 1
-dfs <- 
-  map(mod$analyses, "mod") %>% 
-  map_dfr(Wald_test, vcov = "CR2", constraints = constrain_zero(2:(no_levels)), test = "HTZ") %>%
-  mutate(
-    eta = df_denom + (q - 1)
-  )
-eta <- mean(dfs$eta)
+  # Pool coef_tests as per https://www.jepusto.com/mi-with-clubsandwich/
 
-# Combine imputed results
-# These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
-res <- MIcombine(results = coefs, variances = vcovs)
-res$coefficients
+  robust_across <-
+    map(mod$analyses, "robu_main") %>%
+    # add coefficient names as a column
+    lapply(function(x) {
+      x$coef <- row.names(x)
+      x
+    }) %>%
+    bind_rows() %>%
+    as.data.frame() %>%
+    # summarize by coefficient
+    group_by(coef) %>%
+    summarise(
+      m = n(),
+      B = var(beta),
+      beta_bar = mean(beta),
+      V_bar = mean(SE^2),
+      eta_bar = mean(df_Satt)
+    ) %>%
+    mutate(
 
-res_tibble <- tibble()
+      # calculate intermediate quantities to get df
+      V_total = V_bar + B * (m + 1) / m,
+      gamma = ((m + 1) / m) * B / V_total,
+      df_m = (m - 1) / gamma^2,
+      df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
+      df = 1 / (1 / df_m + 1 / df_obs),
 
-# Test of moderator overall
-Cmat <- constrain_zero(2:(no_levels), coefs = res$coefficients)
-Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
-Fstat <- (eta - q + 1) / (eta * q) * as.numeric(Q)
-p_val <- pf(Fstat, df1 = q, df2 = eta - q + 1, lower.tail = FALSE)
-res_tibble <- bind_rows(res_tibble, data.frame(domain = "Overall", Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val))
+      # calculate summary quantities for output
+      se = sqrt(V_total),
+      t = beta_bar / se,
+      p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
+      crit = qt(0.975, df = df),
+      lo95 = beta_bar - se * crit,
+      hi95 = beta_bar + se * crit
+    ) %>%
+    select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
 
-# Test of domains
-# Get coefficients
-coefs <- map(mod$analyses, "mod_interact") %>% map(coef)
+  robust_domain <-
+    map(mod$analyses, "robu_interact") %>%
+    # add coefficient names as a column
+    lapply(function(x) {
+      x$coef <- row.names(x)
+      x
+    }) %>%
+    bind_rows() %>%
+    as.data.frame() %>%
+    # summarize by coefficient
+    group_by(coef) %>%
+    summarise(
+      m = n(),
+      B = var(beta),
+      beta_bar = mean(beta),
+      V_bar = mean(SE^2),
+      eta_bar = mean(df_Satt)
+    ) %>%
+    mutate(
 
-# Get CR2 variance-covariance matrices
-vcovs <- map(mod$analyses, "mod_interact") %>%  map(vcovCR, type = "CR2")
+      # calculate intermediate quantities to get df
+      V_total = V_bar + B * (m + 1) / m,
+      gamma = ((m + 1) / m) * B / V_total,
+      df_m = (m - 1) / gamma^2,
+      df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
+      df = 1 / (1 / df_m + 1 / df_obs),
 
-# Get denominator df from complete-data F-tests
-q <- no_levels - 1
+      # calculate summary quantities for output
+      se = sqrt(V_total),
+      t = beta_bar / se,
+      p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
+      crit = qt(0.975, df = df),
+      lo95 = beta_bar - se * crit,
+      hi95 = beta_bar + se * crit
+    ) %>%
+    select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
 
-eta_domain <- numeric()
+  # Get coefficients
+  coefs <- map(mod$analyses, "mod") %>% map(coef)
 
-for (i in 1:3) {
-  dfs <- 
-  map(mod$analyses, "mod_interact") %>% 
-  map_dfr(Wald_test, vcov = "CR2", constraints = constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3)), test = "HTZ") %>%
-  mutate(
-    eta = df_denom + (q - 1)
-  )
-eta_domain[i] <- mean(dfs$eta)
-}
+  # Get CR2 variance-covariance matrices
+  vcovs <- map(mod$analyses, "mod") %>% map(vcovCR, type = "CR2")
+
+  # Get denominator df from complete-data F-tests
+  q <- no_levels - 1
+  dfs <-
+    map(mod$analyses, "mod") %>%
+    map_dfr(Wald_test, vcov = "CR2", constraints = constrain_zero(2:(no_levels)), test = "HTZ") %>%
+    mutate(
+      eta = df_denom + (q - 1)
+    )
+  eta <- mean(dfs$eta)
+
+  # Combine imputed results
+  # These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
+  res <- MIcombine(results = coefs, variances = vcovs)
+  res$coefficients
+
+  res_tibble <- tibble()
+
+  # Test of moderator overall
+  Cmat <- constrain_zero(2:(no_levels), coefs = res$coefficients)
+  Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
+  Fstat <- (eta - q + 1) / (eta * q) * as.numeric(Q)
+  p_val <- pf(Fstat, df1 = q, df2 = eta - q + 1, lower.tail = FALSE)
+  res_tibble <- bind_rows(res_tibble, data.frame(domain = "Overall", Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val))
+
+  # Test of domains
+  # Get coefficients
+  coefs <- map(mod$analyses, "mod_interact") %>% map(coef)
+
+  # Get CR2 variance-covariance matrices
+  vcovs <- map(mod$analyses, "mod_interact") %>% map(vcovCR, type = "CR2")
+
+  # Get denominator df from complete-data F-tests
+  q <- no_levels - 1
+
+  eta_domain <- numeric()
+
+  for (i in 1:3) {
+    dfs <-
+      map(mod$analyses, "mod_interact") %>%
+      map_dfr(Wald_test, vcov = "CR2", constraints = constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3)), test = "HTZ") %>%
+      mutate(
+        eta = df_denom + (q - 1)
+      )
+    eta_domain[i] <- mean(dfs$eta)
+  }
 
 
-# Combine imputed results
-# These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
-res <- MIcombine(results = coefs, variances = vcovs)
-res$coefficients
+  # Combine imputed results
+  # These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
+  res <- MIcombine(results = coefs, variances = vcovs)
+  res$coefficients
 
 
-for (i in 1:3) {
-# Test of moderator overall
-Cmat <- constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3), coefs = res$coefficients)
-Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
-Fstat <- (eta - q + 1) / (eta * q) * as.numeric(Q)
-p_val <- pf(Fstat, df1 = q, df2 = eta - q + 1, lower.tail = FALSE)
-res_tibble <- bind_rows(res_tibble, data.frame(domain = names(res$coefficients)[((no_levels * 1:3)-(3-i))[1]], Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val))
-}
+  for (i in 1:3) {
+    # Test of moderator overall
+    Cmat <- constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3), coefs = res$coefficients)
+    Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
+    Fstat <- (eta_domain[i]  - q + 1) / (eta_domain[i]  * q) * as.numeric(Q)
+    p_val <- pf(Fstat, df1 = q, df2 = eta_domain[i] - q + 1, lower.tail = FALSE)
+    res_tibble <- bind_rows(res_tibble, data.frame(domain = names(res$coefficients)[i], Fstat = Fstat, df_num = q, df_denom = eta_domain[i]  - q + 1, p_val = p_val))
+  }
 
-list(list(moderator_test = res_tibble, robu_averages = robust_across, robu_domains = robust_domain)) %>% set_names(moderator)
+  list(moderator_test = res_tibble, robu_averages = robust_across, robu_domains = robust_domain)
 })
+
+single_moderator_tests %>% map_dfr("moderator_test", .id = "moderator") %>% 
+  rowwise() %>% 
+  mutate(domain = str_remove(domain, "domain"),
+         p_fmt = paste(fmt_p(p_val, equal_sign = FALSE), sigstars(p_val)),
+         moderator = var_names$new[var_names$old == moderator]) %>%
+    select(moderator, domain, p_fmt) %>% 
+  spread(domain, p_fmt) %>% 
+  select(Moderator = moderator, Overall, Demographic, Cognitive, `Job-related`)
+
 ```
 
 ```{r}
+# From https://www.jepusto.com/mi-with-clubsandwich/
+pool_robust <- function(models) {
+  models %>% 
+  map(coef_test, vcov = "CR2") %>% 
+    # add coefficient names as a column
+    lapply(function(x) {
+      x$coef <- row.names(x)
+      x
+    }) %>%
+    bind_rows() %>%
+    as.data.frame() %>%
+    # summarize by coefficient
+    group_by(coef) %>%
+    summarise(
+      m = n(),
+      B = var(beta),
+      beta_bar = mean(beta),
+      V_bar = mean(SE^2),
+      eta_bar = mean(df_Satt)
+    ) %>%
+    mutate(
+      # calculate intermediate quantities to get df
+      V_total = V_bar + B * (m + 1) / m,
+      gamma = ((m + 1) / m) * B / V_total,
+      df_m = (m - 1) / gamma^2,
+      df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
+      df = 1 / (1 / df_m + 1 / df_obs),
+
+      # calculate summary quantities for output
+      se = sqrt(V_total),
+      t = beta_bar / se,
+      p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
+      crit = qt(0.975, df = df),
+      lo95 = beta_bar - se * crit,
+      hi95 = beta_bar + se * crit
+    ) %>%
+    select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
+}
+
+pooled_Wald <- function(models, which_coefs) {
+# Get coefficients
+  coefs <- models %>% map(coef)
+
+  # Get CR2 variance-covariance matrices
+  vcovs <- models %>% map(vcovCR, type = "CR2")
+  
+   ref_coefs <- coefs[[1]] %>% names() %>% str_detect(., which_coefs) %>% which()
+ 
+  
+   message("For ", which_coefs, " now testing: ", coefs[[1]] %>% names() %>% .[ref_coefs] %>% paste(collapse = " "))
+   
+  # Get denominator df from complete-data F-tests
+  q <- length(ref_coefs)
+
+  eta <- numeric()
+
+    dfs <-
+      models %>%
+      map_dfr(Wald_test, vcov = "CR2", constraints = constrain_zero(ref_coefs), test = "HTZ") %>%
+      mutate(
+        eta = df_denom + (q - 1)
+      )
+    eta <- mean(dfs$eta)
+  
+
+
+  # Combine imputed results
+  # These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
+  res <- MIcombine(results = coefs, variances = vcovs)
+  res$coefficients
+
+    Cmat <- constrain_zero(ref_coefs, coefs = res$coefficients)
+    Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
+    Fstat <- (eta  - q + 1) / (eta  * q) * as.numeric(Q)
+    p_val <- pf(Fstat, df1 = q, df2 = eta - q + 1, lower.tail = FALSE)
+   tibble(query = which_coefs, Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val)
+}
+
+
+
+```
+
+
+```{r}
+
+
 mod <- with(imp, {V <-  impute_covariance_matrix(vi = var_adj,
                                    cluster = articlestudy,
                                    r = rho)
   
-  mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
-                              V = V,
-                              random = ~ 1 | articlestudy/effect_id,
-                              test = "t",
-                              dfs = "contain",
-                              sparse = TRUE)
-
-  mod_interact <- rma.mv(as.formula(paste0("r_adj ~ ", domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
-                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus)),
-                              V = V,
-                              random = ~ 1 | articlestudy/effect_id,
-                              test = "t",
-                              dfs = "contain",
-                              sparse = TRUE)
-
+  complexity <- factor(complexity, ordered = FALSE)
+  interdep <- factor(interdep, ordered = FALSE)
+  longevity <- factor(longevity, ordered = FALSE)
+  art_focus <- factor(art_focus, ref = FALSE)
   
+  
+
+  mod <- rma.mv(r_adj ~ year_merged + complexity + interdep + collectivism + 
+                                 longevity + meas_type + rater + design + art_focus,
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              test = "t",
+                              dfs = "contain",
+                              sparse = TRUE)
+
+  mod_interact <- rma.mv(r_adj ~ domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
+                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus,
+                              V = V,
+                              random = ~ 1 | articlestudy/effect_id,
+                              test = "t",
+                              dfs = "contain",
+                              sparse = TRUE)
+  
+  list(mod = mod, mod_interact = mod_interact)
+  
+})
+
+coefs_across <- map(mod$analyses, "mod") %>% pool_robust()
+coefs_domains <- map(mod$analyses, "mod_interact") %>% pool_robust()
+
+# TK - loop over overall and domain prefixes (^, Cognitive:, Job-related:), merge all and create table:
+map(mod$analyses, "mod_interact") %>% pooled_Wald("^art_focus")
 
 ```
 
