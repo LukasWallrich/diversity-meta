@@ -29,7 +29,7 @@ source("helpers/helpers.R")
 
 *Credits:* This code builds on the [RMarkdown template for Correlational studies meta-analysis in Psychology](https://osf.io/f85uy/), developed by Adrien Fillon and Gilad Feldman. 
 
-```{r intro, include=FALSE}
+```{r importfile, include=FALSE}
 # Read M/SD as character to retain trailing 0s for GRIM/GRIMMER
 col_types_en <- c(rep("?", 56), rep("_", 8))
 col_types_en[c(3, 33:35, 42:45)] <- "c"
@@ -74,7 +74,7 @@ rho <- 0.6
 
 
 
-```{r importfile, include=FALSE}
+```{r merge-effects, include=FALSE}
 # Rename variables
 rename_vec_en <- c(
   NULL = "double coded",
@@ -1124,7 +1124,7 @@ ggplot(aes(x = specification, y = value, color = color)) +
 
 ## Prepare moderators
 
-```{r}
+```{r add-moderator-data}
 if (!file.exists("data/hofstede.csv")) {
   download.file("https://geerthofstede.com/wp-content/uploads/2016/08/6-dimensions-for-website-2015-08-16.csv", "data/hofstede.csv")
 }
@@ -1665,193 +1665,321 @@ dataset_aggregate <- dataset %>%
   mutate(es_aggregate_id = cur_group_id()) %>% 
   ungroup()
   
-dataset_aggregate <- escalc(yi = r_adj, vi = var_adj, data = datasets_single)
+dataset_aggregate <- escalc(yi = r_adj, vi = var_adj, data = dataset_aggregate) %>% 
+  aggregate.escalc(cluster = es_aggregate_id, rho = rho, struct = "CS", na.rm = FALSE)
 
-dataset_aggregate <-   aggregate.escalc(dataset_aggregate, 
-                                         cluster = es_aggregate_id, rho = rho, struct = "CS")
-```
-
-## Impute best case
-
-```{r best-imputation-functions}
-# Ensure that sub-domains are only imputed within each domain (otherwise get invalid imputations)
-mice.impute.imp_sub_domain <- function(y, ry, x, ...) {
-
-  # y is the vector to be imputed
-  # ry is a logical vector indicating which values in y are missing
-  # x is the matrix of predictor variables, already filtered by predMatrix
-  dots <- list(...)
-
-  # Domain information cannot be extracted from x as it is dummy-coded there, so take from global env
-  unique_domains <- unique(domains)  # Consider only domains where y is missing
-  
-  imputed <- rep(NA, sum(dots$wy))  # Start with y and replace missing values
-
-  imps <- list()
-  
-  for (d in unique_domains) {
-    # Subset data for the current domain
-    rows_in_domain <- which(domains == d)  # Rows in this domain where y is missing
-    y_sub <- y[rows_in_domain]
-    x_sub <- x[rows_in_domain, ]
-    ry_sub <- ry[rows_in_domain]
-    dots_sub <- dots
-    dots_sub$wy <- dots_sub$wy[rows_in_domain]
-    
-    # Apply polyreg imputation method for the current domain
-    args_list <- c(list(y_sub, ry_sub, x_sub), dots_sub)
-    imp <- do.call("mice.impute.best_polyreg", args_list)
-    
-    # Assign the imputed values back to the result vector
-    #imputed[rows_in_domain] <- imp
-    
-    imps[d] <- list(imp)
-  }
-  
-    # Order imps content based on domains and locations specified in wy
-  ds <- domains[dots$wy]
-  
-    for (d in unique_domains) {
-      imputed[ds == d] <- unlist(imps[d])
-    }    
-  
-  return(imputed)
-}
-
-# Derived from mice polyreg function but without noise
-# Derived from mice package code, copyright Stef van Buuren
-mice.impute.best_polyreg <- function(y, ry, x, wy = NULL, nnet.maxit = 100,
-                                nnet.trace = FALSE, nnet.MaxNWts = 1500, ...) {
-
-  if (is.null(wy)) {
-    wy <- !ry
-  }
-  x <- as.matrix(x)
-  fy <- as.factor(y)
-  nc <- length(levels(fy))
-
-  xy <- cbind.data.frame(y = y, x = x)
-
-  if (ncol(x) == 0L) {
-    xy <- data.frame(xy, int = 1)
-  }
-
-  # escape with same impute if the dependent does not vary
-  cat.has.all.obs <- table(y[ry]) == sum(ry)
-  if (any(cat.has.all.obs)) {
-    return(rep(levels(fy)[cat.has.all.obs], sum(wy)))
-  }
-
-  fit <- nnet::multinom(formula(xy),
-    data = xy[ry, , drop = FALSE],
-    maxit = nnet.maxit, trace = nnet.trace, MaxNWts = nnet.MaxNWts,
-    ...
-  )
-  post <- predict(fit, xy[wy, , drop = FALSE], type = "probs")
-  if (sum(wy) == 1) {
-    post <- matrix(post, nrow = 1, ncol = length(post))
-  }
-  if (is.vector(post)) {
-    post <- matrix(c(1 - post, post), ncol = 2)
-  }
-
-
-  max_col_index <- apply(post, 1, which.max)
-  colnames(post)[max_col_index]
-
-}
-
-# Derived from mice polr function but without noise
-mice.impute.best_polr <- function(y, ry, x, wy = NULL, nnet.maxit = 100,
-                             nnet.trace = FALSE, nnet.MaxNWts = 1500,
-                             polr.to.loggedEvents = FALSE, ...) {
-  if (is.null(wy)) wy <- !ry
-
-  # augment data to evade issues with perfect prediction
-  x <- as.matrix(x)
-  xy <- cbind.data.frame(y = y, x = x)
-
-  ## polr may fail on sparse data. We revert to multinom in such cases.
-  fit <- try(
-    suppressWarnings(MASS::polr(formula(xy),
-      data = xy[ry, , drop = FALSE],
-      control = list(...)
-    )),
-    silent = TRUE
-  )
-  if (inherits(fit, "try-error")) {
-    if (polr.to.loggedEvents) {
-      updateLog(out = "polr falls back to multinom", frame = 6)
-    }
-    fit <- nnet::multinom(formula(xy),
-      data = xy[ry, , drop = FALSE],
-      maxit = nnet.maxit, trace = nnet.trace,
-      MaxNWts = nnet.MaxNWts, ...
-    )
-  }
-  post <- predict(fit, xy[wy, , drop = FALSE], type = "probs")
-  if (sum(wy) == 1) {
-    post <- matrix(post, nrow = 1, ncol = length(post))
-  }
-
-  max_col_index <- apply(post, 1, which.max)
-  colnames(post)[max_col_index]
-
-}
-
-```
-
-
-```{r}
-# Specify ordered factors
-dataset_aggregate$longevity <- factor(dataset_aggregate$longevity, levels = c("hours", "days", "weeks", "months", "years", "stable"), ordered = TRUE)
-dataset_aggregate$interdep <- factor(dataset_aggregate$interdep, levels = c("low", "medium", "high"), ordered = TRUE)
-dataset_aggregate$complexity <- factor(dataset_aggregate$complexity, levels = c("low", "medium", "high"), ordered = TRUE)
+# Remove escalc class to avoid future issues
+dataset_aggregate <- as_tibble(dataset_aggregate)
 
 set.seed(2124)
 datasets_sampled <- dataset_aggregate %>% 
   group_by(articlestudy, domain) %>% 
   slice_sample(n = 1) %>% 
   ungroup() 
+```
 
-# specify variables to include in hot-decking (those in metaCart and relevant other preds)
-mi_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "team_function", "country", "n_teams", "stud_sample", 
-             "tmt", "domain", "sub_dom", "meas_type", "rater", "interdep", "complexity", "longevity", "power_distance", "collectivism", 
-             "year_merged", "citation_count")
+## Impute best case
 
-# Get matrices
-datasets_sampled_reduced <- datasets_sampled %>% select(articlestudy, domain, r_adj, se, all_of(mi_vars))
-imp <- mice(datasets_sampled_reduced, maxit=0, seed = 1526)
+```{r best-imputation-functions}
+
+dummy_code_df <- function(df, exclude_column, drop_first = TRUE) {
+  if (!is.character(exclude_column)) {
+    stop("exclude_column must be a character string.")
+  }
+  
+  for (col_name in names(df)) {
+    if (col_name != exclude_column && is.factor(df[[col_name]]) && !is.ordered(df[[col_name]])) {
+
+      # Get levels and potentially drop the first one
+      levels_to_dummy <- levels(df[[col_name]])
+      if (drop_first) {
+        levels_to_dummy <- levels_to_dummy[-1]
+      }
+
+      # Create dummy columns for each level
+      for (level in levels_to_dummy) {
+        dummy_name <- paste0(col_name, "_", level) %>% vctrs::vec_as_names(repair = "universal_quiet")
+        df[[dummy_name]] <- df[[col_name]] == level
+      }
+      
+      # Remove the original factor column if not excluded
+      df[[col_name]] <- NULL
+    }
+  }
+  
+  return(df)
+}
+
+# Imputation code inspired from mice package, copyright Stef van Buuren - thanks
+
+impute_best_polr <- function(dat, var_name) {
+  
+  dat <- dummy_code_df(dat, var_name)
+  
+  collinear <- mice:::find.collinear(dat)
+  
+  if (length(collinear) > 0) {
+  
+  dat <- dat[-which(names(dat) %in% setdiff(collinear, var_name))]
+  }
+  
+  y_missing <- which(is.na(dat[var_name]))
+  
+  f <- setdiff(colnames(dat), var_name) %>% glue::glue_collapse(sep = " + ") %>% paste(var_name, "~", .)
+  
+  complete_dat <- dat %>% drop_na(everything())
+  
+  ## polr may fail on sparse data. We revert to multinom in such cases.
+  fit <- try({
+    MASS::polr(as.formula(f),
+      data = complete_dat,
+    )
+      post <- predict(fit, dat[is.na(dat[var_name]), ], type = "probs")
+  })
+  if (inherits(fit, "try-error")) {
+      message("polr falls back to multinom")
+    fit <- nnet::multinom(as.formula(f),
+      data = complete_dat,
+      maxit = 100, trace = FALSE,
+      MaxNWts = 1500
+    )
+      post <- predict(fit, dat[is.na(dat[var_name]), ], type = "probs")
+  }
+  
+  
+  if (length(y_missing) == 1) {
+    temp <- matrix(post, nrow = 1, ncol = length(post))
+    colnames(temp) <- names(post)
+    post <- temp
+  }
+
+max_col_index <- apply(post, 1, \(x) {
+  if(all(is.na(x))) {
+    return(NA)
+  } else {
+    return(which(x == max(x, na.rm = TRUE)))
+  }
+})
+
+new_y <- colnames(post)[max_col_index]
 
 
-# Set variables of interest to be predicted by each other, all others ignored
-preds <- imp$predictorMatrix
-preds[] <- 0  
-preds[mi_vars, mi_vars] <- 1
+  if(length( dat[[var_name]][y_missing] ) != length(new_y)) browser()
+  
+  dat[[var_name]][y_missing] <- new_y
+  
+    message("Imputed ", sum(!is.na(dat[[var_name]][y_missing])), " values.")
+  
+    
+  dat[[var_name]]
+}
 
-# Use other model variables in MI model
-preds[mi_vars, "r_adj"] <- 1
-preds[mi_vars, "se"] <- 1
+impute_best_polyreg <- function(dat, var_name) {
+  
+  dat <- dummy_code_df(dat, var_name)
+  
+  collinear <- mice:::find.collinear(dat)
+  
+  if (length(collinear) > 0) {
+  
+    dat <- dat[-which(names(dat) %in% setdiff(collinear, var_name))]
+  }
+  
+  y_missing <- which(is.na(dat[var_name]))
+  
+  f <- setdiff(colnames(dat), var_name) %>% glue::glue_collapse(sep = " + ") %>% paste(var_name, "~", .)
+  
+  complete_dat <- dat %>% drop_na(everything())
+  
+  
+    fit <- nnet::multinom(as.formula(f),
+      data = complete_dat,
+      maxit = 100, trace = FALSE,
+      MaxNWts = 3000
+    )
+    
+  tryCatch({
+    post <- predict(fit, dat[is.na(dat[var_name]), ], type = "probs")
+  if (length(y_missing) == 1) {
+    temp <- matrix(post, nrow = 1, ncol = length(post))
+    colnames(temp) <- names(post)
+    post <- temp
+  }
 
-methods <- imp$method
+max_col_index <- apply(post, 1, \(x) {
+  if(all(is.na(x))) {
+    return(NA)
+  } else {
+    return(which(x == max(x, na.rm = TRUE)))
+  }
+})
+new_y <- colnames(post)[max_col_index]
 
-# Use pmm for factors with many levels
-methods[c("ind_sector", "team_function", "country", "sub_dom")] <- "pmm"
-methods[!names(methods) %in% mi_vars] <- ""
-methods["sub_dom"] <- "imp_sub_domain"
-methods[methods == "polr"] <- "best_polr"
+  
+  dat[[var_name]][y_missing] <- new_y
+    },
+  error = \(e) {
+    warning("Prediction failed")
+    return(dat[[var_name]])
+    })
 
-
-# Note that the functions here use column names from predict to determine imputation values
-# This can lead to issues with imputed valued that should contain blanks or special characters - in those cases, would need to refine code
-imp <- mice(datasets_sampled_reduced, m = 1, seed = 1526, predictorMatrix = preds, 
-            method = methods, donors = 1)  
-
-imp2 <- mice(dataset_red, m = 1, seed = 1526, predictorMatrix = preds2, 
-            method = methods2, donors = 1)  
+  
+  message("Imputed ", sum(!is.na(dat[[var_name]][y_missing])), " values.")  
+    
+  dat[[var_name]]
+}
 
 
 ```
+
+
+```{r}
+# Specify ordered factors
+datasets_sampled <- datasets_sampled %>% mutate(across(c(where(is.character), -articlestudy), factor))
+
+datasets_sampled$longevity <- factor(datasets_sampled$longevity, levels = c("hours", "days", "weeks", "months", "years", "stable"), ordered = TRUE)
+datasets_sampled$interdep <- factor(datasets_sampled$interdep, levels = c("low", "medium", "high"), ordered = TRUE)
+datasets_sampled$complexity <- factor(datasets_sampled$complexity, levels = c("low", "medium", "high"), ordered = TRUE)
+
+
+
+# specify variables to include in hot-decking (those in metaCart and relevant other preds)
+mi_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "team_function", 
+             "n_teams", "stud_sample", 
+             "tmt", "domain", "sub_dom", "meas_type", "rater", "interdep", "complexity", "longevity", "power_distance",
+             "collectivism", "year_merged", "citation_count")
+
+datasets_sampled_reduced <- datasets_sampled %>% select(articlestudy, domain, r_adj, se, all_of(mi_vars))
+
+### Impute BEST version
+
+datasets_sampled_reduced_best <- datasets_sampled_reduced
+
+missing_patterns <- function(dataset, target_var) {
+  dataset <- dataset[is.na(dataset[[target_var]]), ]
+  dataset %>% select(-matches(target_var)) %>%  
+    mutate(missing_vars = pmap_chr(., function(...) {
+    vars <- names(c(...))
+    missing <- vars[is.na(c(...))]
+    if (length(missing) == 0) return(NA_character_) # Return NA if no missing vars
+    paste(missing, collapse = "|")
+  })) %>% mutate(across(-missing_vars, ~ as.numeric(is.na(.)))) %>%
+  mutate(m = rowSums(across(-missing_vars), na.rm = TRUE)) %>%
+  group_by(missing_vars, m) %>%
+  summarise(n = n(), .groups = 'drop') %>%
+  arrange(m, -n)
+}
+
+
+impute_sequentially <- function(dataset, target_var, fun) {
+  missings <- missing_patterns(dataset, target_var)
+  if (any(is.na(missings$missing_vars)))  {
+    dataset[[target_var]] <- do.call(fun, list(dataset, target_var))
+  } 
+  missings <- missings %>% filter(!is.na(missing_vars))
+  if (nrow(missings) == 0) return(dataset[[target_var]])
+  for (i in 1:nrow(missings)) {
+    dataset[[target_var]] <- do.call(fun, list(dataset %>% select(-matches(missings[i,]$missing_vars)), target_var))
+  }
+  dataset[[target_var]]
+}
+
+polr_vars <- c("interdep", "complexity", "longevity")
+
+polyreg_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "team_function", 
+             "stud_sample", "tmt", "domain", "meas_type", "rater")
+
+special_var <- c( "sub_dom")
+             
+pmm_vars <- c("power_distance", "collectivism")
+
+for (var in polr_vars) {
+  if (any(is.na(datasets_sampled_reduced_best[[var]]))) {
+    message("\n\n Imputing ", var)
+    datasets_sampled_reduced_best[[var]] <- impute_sequentially(datasets_sampled_reduced_best %>% select(-articlestudy), var, impute_best_polr)
+  }
+}
+
+for (var in polyreg_vars) {
+  if (any(is.na(datasets_sampled_reduced_best[[var]]))) {
+        message("\n\n Imputing ", var)
+    datasets_sampled_reduced_best[[var]] <- impute_sequentially(datasets_sampled_reduced_best %>% select(-articlestudy), var, impute_best_polyreg)
+  }
+}
+
+# Impute sub-domains by domain, to ensure valid values
+datasets_sampled_reduced_best_split <- split(datasets_sampled_reduced_best, datasets_sampled_reduced_best$domain)
+for (domain in names(datasets_sampled_reduced_best_split)) {
+  datasets_sampled_reduced_best_split[[domain]]$sub_dom <- impute_sequentially(datasets_sampled_reduced_best_split[[domain]] %>% select(-articlestudy), "sub_dom", impute_best_polyreg)
+}
+
+datasets_sampled_reduced_best <- bind_rows(datasets_sampled_reduced_best_split)
+
+
+# For continuous variables, use PMM function in mice
+imp <- mice(datasets_sampled_reduced_best, maxit = 0)
+
+methods <- imp$method
+methods[] <- ""
+methods[pmm_vars] <- "pmm"
+preds <- imp$predictorMatrix
+preds[] <- 0  
+
+preds[pmm_vars, mi_vars] <- 1
+preds[pmm_vars, "r_adj"] <- 1
+preds[pmm_vars, "se"] <- 1
+preds[pmm_vars, pmm_vars] <- 0 # Are generally missing together, so this would not help
+
+imp <- mice(datasets_sampled_reduced_best, m = 1, seed = 1600, predictorMatrix = preds, 
+            method = methods, donors = 1)
+
+
+datasets_sampled_reduced_best <- datasets_sampled_reduced_best %>% select(-all_of(pmm_vars)) %>% 
+  left_join(imp %>% complete() %>% select(articlestudy, domain, all_of(pmm_vars)))
+
+
+datasets_sampled_reduced_best <- datasets_sampled_reduced_best %>% left_join(
+  datasets_sampled %>% select(articlestudy, domain, country)
+)
+
+
+### Impute random (worst case)
+
+impute_with_random_draw <- function(dataframe) {
+  for (col in names(dataframe)) {
+    missing_indices <- which(is.na(dataframe[[col]]))
+    if (length(missing_indices) > 0) {
+      non_missing_values <- dataframe[[col]][!is.na(dataframe[[col]])]
+      if (length(non_missing_values) > 0) {
+        dataframe[[col]][missing_indices] <- sample(non_missing_values, length(missing_indices), replace = TRUE)
+      }
+    }
+  }
+  return(dataframe)
+}
+
+datasets_sampled_reduced_random <- datasets_sampled_reduced
+
+datasets_sampled_reduced_random <- datasets_sampled_reduced_random %>% select(-sub_dom) %>% impute_with_random_draw() %>% 
+  left_join(datasets_sampled_reduced_random %>% select(articlestudy, domain, sub_dom))
+
+# Impute sub-domains by domain, to ensure valid values
+datasets_sampled_reduced_random_split <- split(datasets_sampled_reduced_random, datasets_sampled_reduced_random$domain)
+for (domain in names(datasets_sampled_reduced_random_split)) {
+  datasets_sampled_reduced_random_split[[domain]] <- impute_with_random_draw(datasets_sampled_reduced_random_split[[domain]])
+}
+
+datasets_sampled_reduced_random <- bind_rows(datasets_sampled_reduced_random_split)
+```
+
+```{r}
+REmrt(r_adj ~ year_merged + complexity + interdep + collectivism + 
+                                 longevity + meas_type + rater + design + art_focus,
+      datasets_sampled_reduced_best,
+      vi = ,
+      c = .5)
+```
+
 
 # Publication bias
 
