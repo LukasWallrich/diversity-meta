@@ -1230,10 +1230,9 @@ methods <- imp$method
 methods[c("ind_sector", "team_function", "country", "sub_dom")] <- "pmm"
 methods[!names(methods) %in% mi_vars] <- ""
 
-# Van Buren - set m to average share missing
-# https://stefvanbuuren.name/fimd/sec-howmany.html
-m <- dataset %>% select(all_of(mi_vars)) %>% naniar::pct_miss() %>% ceiling()
-m
+# Van Buren - set m conservatively to share of incomplete cases
+m <- {dataset %>% select(all_of(mi_vars)) %>% naniar::prop_miss_case() * 100} %>% ceiling()
+x
 
 domains <- dataset$domain
 # Ensure that sub-domains are only imputed within each domain (otherwise get invalid imputations)
@@ -1462,207 +1461,11 @@ bind_rows(cat_summary %>% select(moderator, p_val, domain),
   left_join(ks) %>% 
   select(Moderator = moderator, k, Overall, Demographic, Cognitive, `Job-related`) %>% gt::gt() %>% 
   tab_header(title = "Univariate moderator tests") %>% 
-  tab_spanner(md("Significance tests (*p*-values)"), Overall:`Job-related`)
+  tab_spanner(md("Significance tests (*p*-values)"), Overall:`Job-related`) %>% 
+  gt::fmt(fns = md) %>% 
+  gt::tab_source_note(timesaveR:::std_stars %>% {glue::glue_collapse(paste(names(.),.), ", ")} %>% html())
 ```
 
-
-```{r}
-single_moderator_tests <- cat_moderators %>% set_names() %>% map(\(moderator) {
-  message("Now estimating ", moderator)
-  
-  no_levels <- dataset[[moderator]] %>%
-    unique() %>%
-    na.omit() %>%
-    length()
-  mod <- with(imp, {
-    V <- impute_covariance_matrix(
-      vi = var_adj,
-      cluster = articlestudy,
-      r = rho
-    )
-    assign(moderator, factor(get(moderator), ordered = FALSE))
-
-    mod <- rma.mv(as.formula(paste0("r_adj ~ ", moderator)),
-      V = V,
-      random = ~ 1 | articlestudy / effect_id,
-      test = "t",
-      dfs = "contain",
-      sparse = TRUE
-    )
-
-    mod_domains <- rma.mv(as.formula(paste0("r_adj ~ 0 + domain + domain:", moderator)),
-      V = V,
-      random = ~ 1 | articlestudy / effect_id,
-      test = "t",
-      dfs = "contain",
-      sparse = TRUE
-    )
-
-    list(
-      mod = mod,
-      mod_interact = mod_domains,
-      robu_main = coef_test(mod, vcov = "CR2"),
-      robu_interact = coef_test(mod_domains, vcov = "CR2")
-    )
-  })
-
-  # Pool coef_tests as per https://www.jepusto.com/mi-with-clubsandwich/
-
-  robust_across <-
-    map(mod$analyses, "robu_main") %>%
-    # add coefficient names as a column
-    lapply(function(x) {
-      x$coef <- row.names(x)
-      x
-    }) %>%
-    bind_rows() %>%
-    as.data.frame() %>%
-    # summarize by coefficient
-    group_by(coef) %>%
-    summarise(
-      m = n(),
-      B = var(beta),
-      beta_bar = mean(beta),
-      V_bar = mean(SE^2),
-      eta_bar = mean(df_Satt)
-    ) %>%
-    mutate(
-
-      # calculate intermediate quantities to get df
-      V_total = V_bar + B * (m + 1) / m,
-      gamma = ((m + 1) / m) * B / V_total,
-      df_m = (m - 1) / gamma^2,
-      df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
-      df = 1 / (1 / df_m + 1 / df_obs),
-
-      # calculate summary quantities for output
-      se = sqrt(V_total),
-      t = beta_bar / se,
-      p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
-      crit = qt(0.975, df = df),
-      lo95 = beta_bar - se * crit,
-      hi95 = beta_bar + se * crit
-    ) %>%
-    select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
-
-  robust_domain <-
-    map(mod$analyses, "robu_interact") %>%
-    # add coefficient names as a column
-    lapply(function(x) {
-      x$coef <- row.names(x)
-      x
-    }) %>%
-    bind_rows() %>%
-    as.data.frame() %>%
-    # summarize by coefficient
-    group_by(coef) %>%
-    summarise(
-      m = n(),
-      B = var(beta),
-      beta_bar = mean(beta),
-      V_bar = mean(SE^2),
-      eta_bar = mean(df_Satt)
-    ) %>%
-    mutate(
-
-      # calculate intermediate quantities to get df
-      V_total = V_bar + B * (m + 1) / m,
-      gamma = ((m + 1) / m) * B / V_total,
-      df_m = (m - 1) / gamma^2,
-      df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
-      df = 1 / (1 / df_m + 1 / df_obs),
-
-      # calculate summary quantities for output
-      se = sqrt(V_total),
-      t = beta_bar / se,
-      p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
-      crit = qt(0.975, df = df),
-      lo95 = beta_bar - se * crit,
-      hi95 = beta_bar + se * crit
-    ) %>%
-    select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma)
-
-  # Get coefficients
-  coefs <- map(mod$analyses, "mod") %>% map(coef)
-
-  # Get CR2 variance-covariance matrices
-  vcovs <- map(mod$analyses, "mod") %>% map(vcovCR, type = "CR2")
-
-  # Get denominator df from complete-data F-tests
-  q <- no_levels - 1
-  dfs <-
-    map(mod$analyses, "mod") %>%
-    map_dfr(Wald_test, vcov = "CR2", constraints = constrain_zero(2:(no_levels)), test = "HTZ") %>%
-    mutate(
-      eta = df_denom + (q - 1)
-    )
-  eta <- mean(dfs$eta)
-
-  # Combine imputed results
-  # These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
-  res <- MIcombine(results = coefs, variances = vcovs)
-  res$coefficients
-
-  res_tibble <- tibble()
-
-  # Test of moderator overall
-  Cmat <- constrain_zero(2:(no_levels), coefs = res$coefficients)
-  Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
-  Fstat <- (eta - q + 1) / (eta * q) * as.numeric(Q)
-  p_val <- pf(Fstat, df1 = q, df2 = eta - q + 1, lower.tail = FALSE)
-  res_tibble <- bind_rows(res_tibble, data.frame(domain = "Overall", Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val))
-
-  # Test of domains
-  # Get coefficients
-  coefs <- map(mod$analyses, "mod_interact") %>% map(coef)
-
-  # Get CR2 variance-covariance matrices
-  vcovs <- map(mod$analyses, "mod_interact") %>% map(vcovCR, type = "CR2")
-
-  # Get denominator df from complete-data F-tests
-  q <- no_levels - 1
-
-  eta_domain <- numeric()
-
-  for (i in 1:3) {
-    dfs <-
-      map(mod$analyses, "mod_interact") %>%
-      map_dfr(Wald_test, vcov = "CR2", constraints = constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3)), test = "HTZ") %>%
-      mutate(
-        eta = df_denom + (q - 1)
-      )
-    eta_domain[i] <- mean(dfs$eta)
-  }
-
-
-  # Combine imputed results
-  # These estimates appear to be the same as the more complicated approach - test with larger sample, then simplify
-  res <- MIcombine(results = coefs, variances = vcovs)
-  res$coefficients
-
-
-  for (i in 1:3) {
-    # Test of moderator overall
-    Cmat <- constrain_equal(coef_indices <- seq(i, no_levels * 3, by = 3), coefs = res$coefficients)
-    Q <- t(Cmat %*% res$coefficients) %*% solve(Cmat %*% res$variance %*% t(Cmat)) %*% (Cmat %*% res$coefficients)
-    Fstat <- (eta_domain[i]  - q + 1) / (eta_domain[i]  * q) * as.numeric(Q)
-    p_val <- pf(Fstat, df1 = q, df2 = eta_domain[i] - q + 1, lower.tail = FALSE)
-    res_tibble <- bind_rows(res_tibble, data.frame(domain = names(res$coefficients)[i], Fstat = Fstat, df_num = q, df_denom = eta_domain[i]  - q + 1, p_val = p_val))
-  }
-
-  list(moderator_test = res_tibble, robu_averages = robust_across, robu_domains = robust_domain)
-})
-
-single_moderator_tests %>% map_dfr("moderator_test", .id = "moderator") %>% 
-  rowwise() %>% 
-  mutate(domain = str_remove(domain, "domain"),
-         p_fmt = paste(fmt_p(p_val, equal_sign = FALSE), sigstars(p_val)),
-         moderator = var_names$new[var_names$old == moderator]) %>%
-    select(moderator, domain, p_fmt) %>% 
-  spread(domain, p_fmt) %>% 
-  select(Moderator = moderator, Overall, Demographic, Cognitive, `Job-related`)
-
-```
 
 ```{r}
 # From https://www.jepusto.com/mi-with-clubsandwich/
@@ -1743,10 +1546,11 @@ pooled_Wald <- function(models, which_coefs) {
    tibble(query = which_coefs, Fstat = Fstat, df_num = q, df_denom = eta - q + 1, p_val = p_val)
 }
 
-
-
 ```
 
+## Run meta-regression
+
+Citation count ommitted as it was registered as exploratory and logically cannot predict (precede) effect size
 
 ```{r}
 
@@ -1755,12 +1559,13 @@ mod <- with(imp, {V <-  impute_covariance_matrix(vi = var_adj,
                                    cluster = articlestudy,
                                    r = rho)
   
-  complexity <- factor(complexity, ordered = FALSE)
-  interdep <- factor(interdep, ordered = FALSE)
-  longevity <- factor(longevity, ordered = FALSE)
-  art_focus <- factor(art_focus, ref = FALSE)
-  
-  
+  complexity <- factor(complexity, ordered = FALSE) %>% relevel(ref = "high")
+  interdep <- factor(interdep, ordered = FALSE) %>% relevel(ref = "high")
+  longevity <- factor(longevity, ordered = FALSE) %>% relevel(ref = "stable")
+  art_focus <- factor(art_focus) %>% relevel(ref = "focal H")
+  meas_type <- factor(meas_type) %>% relevel(ref = "Variety")
+  rater <- factor(rater) %>% relevel(ref = "Objective")
+  design <- factor(design) %>% relevel(ref = "Observational")
 
   mod <- rma.mv(r_adj ~ year_merged + complexity + interdep + collectivism + 
                                  longevity + meas_type + rater + design + art_focus,
@@ -1785,204 +1590,266 @@ mod <- with(imp, {V <-  impute_covariance_matrix(vi = var_adj,
 coefs_across <- map(mod$analyses, "mod") %>% pool_robust()
 coefs_domains <- map(mod$analyses, "mod_interact") %>% pool_robust()
 
-# TK - loop over overall and domain prefixes (^, Cognitive:, Job-related:), merge all and create table:
-map(mod$analyses, "mod_interact") %>% pooled_Wald("^art_focus")
+cat_moderators <- c("complexity", "interdep", "longevity", "meas_type", "rater", "design", "art_focus")
+cont_moderator <- c("year_merged", "collectivism", "power_distance")
+
+cat_moderators_regex <- c(paste0("^", cat_moderators), 
+                          paste0("Cognitive:", cat_moderators), 
+                          paste0("Job-related:", cat_moderators))
+
+# Loop over domains (^, Cognitive:, Job-related:), merge all results
+cont_interaction_tests <- map(mod$analyses, "mod_interact") %>% {
+  map_dfr(cat_moderators_regex, \(query) pooled_Wald(., query))
+} %>% 
+  mutate(domain = case_when(str_detect(query, "^\\^") ~ "Demographic",
+                            str_detect(query, "Cognitive:") ~ "Cognitive",
+                            str_detect(query, "Job-related:") ~ "Job-related"),
+         moderator = query %>% str_remove("^\\^") %>% 
+            str_remove("Cognitive:") %>% 
+           str_remove("Job-related:"),
+         moderator = sapply(moderator, function(coeff) {
+    matches <- str_detect(coeff, paste0("^", cat_moderators))
+    if(any(matches)) {
+      return(cat_moderators[which.max(matches)]) # Returns the first matched moderator
+    } else {
+      warning("Failed moderator match: ", coeff)
+      return(NA)
+    }
+  }))
+
+# Loop over average results:
+cont_avg_tests <- map(mod$analyses, "mod") %>% {
+  map_dfr(cat_moderators, \(query) pooled_Wald(., query))
+} %>% 
+  mutate(domain = "Overall", moderator = sapply(query, function(coeff) {
+    matches <- str_detect(coeff, paste0("^", cat_moderators))
+    if(any(matches)) {
+      return(cat_moderators[which.max(matches)]) # Returns the first matched moderator
+    } else {
+      return(NA)
+    }
+  }))
+
+# Combine all results into 1 table
+coefs_domains %>% filter(map(cont_moderator, \(m) str_detect(coef, m)) %>% Reduce(`|`, .)) %>% 
+  mutate(domain = case_when(str_detect(coef, "Cognitive:") ~ "Cognitive",
+                            str_detect(coef, "Job-related:") ~ "Job-related",
+                            .default = "Demographic"),
+         moderator = coef %>% str_remove(".*:")) %>% 
+  bind_rows(coefs_across %>% filter(coef %in% cont_moderator) %>% transmute(domain = "Overall", moderator = coef, p_val)) %>% 
+  bind_rows(cont_interaction_tests, cont_avg_tests) %>% 
+ select(domain, moderator, p_val) %>% 
+rowwise() %>% 
+  mutate(         p_fmt = paste(fmt_p(p_val, equal_sign = FALSE), sigstars(p_val)),
+         moderator = var_names$new[var_names$old == moderator]) %>%
+    select(moderator, domain, p_fmt) %>% 
+  spread(domain, p_fmt) %>% 
+  select(Moderator = moderator, Overall, Demographic, Cognitive, `Job-related`) %>% gt::gt() %>% 
+  tab_header(title = "Multivariate (meta-regression) moderator tests") %>% 
+  tab_spanner(md("Significance tests (*p*-values)"), Overall:`Job-related`) %>% 
+  gt::fmt(fns = md) %>% 
+  gt::tab_source_note(timesaveR:::std_stars %>% {glue::glue_collapse(paste(names(.),.), ", ")} %>% html())
+
+# TK: Deep-dive into significant ones & all in appendix
 
 ```
-
-
-
-## Run meta-regression
-
-Citation count ommitted as it was registered as exploratory and logically cannot predict (precede) effect size
-
-```{r}
-# Ordered factors lead to non-sensical model outputs (polynomials)
-
-meta_reg_models <- with(imp,
-                        {
-                        V <-  impute_covariance_matrix(vi = var_adj,
-                                   cluster = articlestudy,
-                                   r = rho)
-
-                        longevity <- factor(longevity, ordered = FALSE) %>% relevel(ref = "stable")
-                        interdep <- factor(interdep, ordered = FALSE)
-                        complexity <- factor(complexity, ordered = FALSE)
-                        
-                        domain <- domain %>% relevel(ref = "Demographic")
-                        design <- design %>% relevel(ref = "Observational")
-                        rater <- rater %>% relevel(ref = "Objective")
-                        
-                        mod <- rma.mv(r_adj ~ 1 + domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
-                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus,
-                              V = V,
-                              random = ~ 1 | articlestudy/effect_id,
-                              sparse = TRUE,
-                              control=list(rel.tol=1e-8))
-                        
-                        robu <- coef_test(mod, vcov="CR2")
-                        
-                        return(list(mod = mod, robu = robu))
-                        })
-
-
-robu_coefs <- map(meta_reg_models$analyses, "robu")
-meta_reg_models_mods <- map(meta_reg_models$analyses, "mod")
-
-# pool results with clubSandwich standard errors
-# Based on Pustejovsky's 2017 blog: https://www.jepusto.com/mi-with-clubsandwich/
-
-robust_pooled <- 
-  robu_coefs %>%
-  
-  # add coefficient names as a column
-  lapply(function(x) {
-    x$coef <- row.names(x)
-    x
-  }) %>%
-  bind_rows() %>%
-  as.data.frame() %>%
-  
-  # summarize by coefficient
-  group_by(coef) %>%
-  summarise(
-    m = n(),
-    B = var(beta),
-    beta_bar = mean(beta),
-    V_bar = mean(SE^2),
-    eta_bar = mean(df_Satt)
-  ) %>%
-  
-  mutate(
-    
-    # calculate intermediate quantities to get df
-    V_total = V_bar + B * (m + 1) / m,
-    gamma = ((m + 1) / m) * B / V_total,
-    df_m = (m - 1) / gamma^2,
-    df_obs = eta_bar * (eta_bar + 1) * (1 - gamma) / (eta_bar + 3),
-    df = 1 / (1 / df_m + 1 / df_obs),
-    
-    # calculate summary quantities for output
-    se = sqrt(V_total),
-    t = beta_bar / se,
-    p_val = 2 * pt(abs(t), df = df, lower.tail = FALSE),
-    crit = qt(0.975, df = df),
-    lo95 = beta_bar - se * crit,
-    hi95 = beta_bar + se * crit
-  )
-
-robust_pooled %>%
-  select(coef, est = beta_bar, se, t, df, p_val, lo95, hi95, gamma) %>%
-  mutate_at(vars(est:gamma), round, 3) %>% arrange((p_val))
-
-
-
-
-            V <-  with(dataset, impute_covariance_matrix(vi = var_adj,
-                                   cluster = articlestudy,
-                                   r = rho))
-
-meta_reg_obs <-  rma.mv(r_adj ~ 1 + domain * year_merged + domain * complexity + domain * interdep + domain * collectivism + 
-                                 domain * longevity + domain * meas_type + domain * rater + domain * design + domain * art_focus,
-                              V = V,
-                        data = dataset,
-                              random = ~ 1 | articlestudy/effect_id,
-                              sparse = TRUE)
-
-
-with(dataset, {
-  complexity <- factor(complexity, ordered = FALSE)
-  rma.mv(r_adj ~ 1 + complexity,
-                              V = V,
-                              random = ~ 1 | articlestudy/effect_id,
-                              sparse = TRUE)
-}) %>% summary()
-
-pool(meta_reg_models) %>% summary() %>% arrange((p.value))
-
-
-# Why not adjust SEs and then pool them?
-
-  return(data.frame(est = coef(rma_result), se = sqrt(diag(vcov(rma_result))), robust_se = sqrt(diag(se_results$vcov))))
-})
-
-# Pool the results using Rubin's Rules
-pooled_est <- colMeans(meta_regression_results$est)
-within_var <- mean(meta_regression_results$se^2)
-between_var <- var(meta_regression_results$est)
-total_var <- within_var + (1 + 1/nrow(meta_regression_results)) * between_var
-pooled_se <- sqrt(total_var)
-
-
-```
-
-
 
 # Meta-CART
 
 ## Combine ES
 
 ```{r}
-datasets_single <- dataset %>% 
-  group_by(articlestudy, `Publication status`, `Article  focus`, year_merged, Design, Rater, Criterion, collectivism, Interdependence, 
-           Complexity, Longevity, Virtuality, `Authority  differentiation`, `Diversity climate`, `Psych safety`, Domain, 
-           `Sub-domain`, `Measure type`) %>% 
-  summarise(#TK - calculate linear composite) %>%
-  group_by(articlestudy, Domain) %>% 
-  slice_sample(n = 1) %>% 
-  ungroup() %>% 
-  split(.$Domain)
+dataset_aggregate <- dataset %>% 
+  group_by(articlestudy, pub_status, art_focus, year_merged, design, rater, collectivism, interdep, 
+           complexity, longevity, virtuality, domain, sub_dom, meas_type) %>% 
+  mutate(es_aggregate_id = cur_group_id()) %>% 
+  ungroup()
   
-# Complete the three datasets with 1) best estimate and 2) random draw
+dataset_aggregate <- escalc(yi = r_adj, vi = var_adj, data = datasets_single)
 
-# Single mice estimate sub-optimal due to random noise - but can polyreg/pmm fuctions be called directly?
-# Alternatively, this simple hot-decking could work:
+dataset_aggregate <-   aggregate.escalc(dataset_aggregate, 
+                                         cluster = es_aggregate_id, rho = rho, struct = "CS")
+```
+
+## Impute best case
+
+```{r best-imputation-functions}
+# Ensure that sub-domains are only imputed within each domain (otherwise get invalid imputations)
+mice.impute.imp_sub_domain <- function(y, ry, x, ...) {
+
+  # y is the vector to be imputed
+  # ry is a logical vector indicating which values in y are missing
+  # x is the matrix of predictor variables, already filtered by predMatrix
+  dots <- list(...)
+
+  # Domain information cannot be extracted from x as it is dummy-coded there, so take from global env
+  unique_domains <- unique(domains)  # Consider only domains where y is missing
+  
+  imputed <- rep(NA, sum(dots$wy))  # Start with y and replace missing values
+
+  imps <- list()
+  
+  for (d in unique_domains) {
+    # Subset data for the current domain
+    rows_in_domain <- which(domains == d)  # Rows in this domain where y is missing
+    y_sub <- y[rows_in_domain]
+    x_sub <- x[rows_in_domain, ]
+    ry_sub <- ry[rows_in_domain]
+    dots_sub <- dots
+    dots_sub$wy <- dots_sub$wy[rows_in_domain]
+    
+    # Apply polyreg imputation method for the current domain
+    args_list <- c(list(y_sub, ry_sub, x_sub), dots_sub)
+    imp <- do.call("mice.impute.best_polyreg", args_list)
+    
+    # Assign the imputed values back to the result vector
+    #imputed[rows_in_domain] <- imp
+    
+    imps[d] <- list(imp)
+  }
+  
+    # Order imps content based on domains and locations specified in wy
+  ds <- domains[dots$wy]
+  
+    for (d in unique_domains) {
+      imputed[ds == d] <- unlist(imps[d])
+    }    
+  
+  return(imputed)
+}
+
+# Derived from mice polyreg function but without noise
+# Derived from mice package code, copyright Stef van Buuren
+mice.impute.best_polyreg <- function(y, ry, x, wy = NULL, nnet.maxit = 100,
+                                nnet.trace = FALSE, nnet.MaxNWts = 1500, ...) {
+
+  if (is.null(wy)) {
+    wy <- !ry
+  }
+  x <- as.matrix(x)
+  fy <- as.factor(y)
+  nc <- length(levels(fy))
+
+  xy <- cbind.data.frame(y = y, x = x)
+
+  if (ncol(x) == 0L) {
+    xy <- data.frame(xy, int = 1)
+  }
+
+  # escape with same impute if the dependent does not vary
+  cat.has.all.obs <- table(y[ry]) == sum(ry)
+  if (any(cat.has.all.obs)) {
+    return(rep(levels(fy)[cat.has.all.obs], sum(wy)))
+  }
+
+  fit <- nnet::multinom(formula(xy),
+    data = xy[ry, , drop = FALSE],
+    maxit = nnet.maxit, trace = nnet.trace, MaxNWts = nnet.MaxNWts,
+    ...
+  )
+  post <- predict(fit, xy[wy, , drop = FALSE], type = "probs")
+  if (sum(wy) == 1) {
+    post <- matrix(post, nrow = 1, ncol = length(post))
+  }
+  if (is.vector(post)) {
+    post <- matrix(c(1 - post, post), ncol = 2)
+  }
 
 
-library(cluster)
+  max_col_index <- apply(post, 1, which.max)
+  colnames(post)[max_col_index]
+
+}
+
+# Derived from mice polr function but without noise
+mice.impute.best_polr <- function(y, ry, x, wy = NULL, nnet.maxit = 100,
+                             nnet.trace = FALSE, nnet.MaxNWts = 1500,
+                             polr.to.loggedEvents = FALSE, ...) {
+  if (is.null(wy)) wy <- !ry
+
+  # augment data to evade issues with perfect prediction
+  x <- as.matrix(x)
+  xy <- cbind.data.frame(y = y, x = x)
+
+  ## polr may fail on sparse data. We revert to multinom in such cases.
+  fit <- try(
+    suppressWarnings(MASS::polr(formula(xy),
+      data = xy[ry, , drop = FALSE],
+      control = list(...)
+    )),
+    silent = TRUE
+  )
+  if (inherits(fit, "try-error")) {
+    if (polr.to.loggedEvents) {
+      updateLog(out = "polr falls back to multinom", frame = 6)
+    }
+    fit <- nnet::multinom(formula(xy),
+      data = xy[ry, , drop = FALSE],
+      maxit = nnet.maxit, trace = nnet.trace,
+      MaxNWts = nnet.MaxNWts, ...
+    )
+  }
+  post <- predict(fit, xy[wy, , drop = FALSE], type = "probs")
+  if (sum(wy) == 1) {
+    post <- matrix(post, nrow = 1, ncol = length(post))
+  }
+
+  max_col_index <- apply(post, 1, which.max)
+  colnames(post)[max_col_index]
+
+}
+
+```
+
+
+```{r}
+# Specify ordered factors
+dataset_aggregate$longevity <- factor(dataset_aggregate$longevity, levels = c("hours", "days", "weeks", "months", "years", "stable"), ordered = TRUE)
+dataset_aggregate$interdep <- factor(dataset_aggregate$interdep, levels = c("low", "medium", "high"), ordered = TRUE)
+dataset_aggregate$complexity <- factor(dataset_aggregate$complexity, levels = c("low", "medium", "high"), ordered = TRUE)
+
+set.seed(2124)
+datasets_sampled <- dataset_aggregate %>% 
+  group_by(articlestudy, domain) %>% 
+  slice_sample(n = 1) %>% 
+  ungroup() 
 
 # specify variables to include in hot-decking (those in metaCart and relevant other preds)
-names(dataset)
-hot_decking_vars <- c()
+mi_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "team_function", "country", "n_teams", "stud_sample", 
+             "tmt", "domain", "sub_dom", "meas_type", "rater", "interdep", "complexity", "longevity", "power_distance", "collectivism", 
+             "year_merged", "citation_count")
 
-distance_matrix <- daisy(dataset  %>% select(all_of(hot_decking_vars)), metric = "gower")
-hot_deck_imputation_partial <- function(data, distance_matrix) {
-  for (i in 1:nrow(data)) {
-    if (any(is.na(data[i,]))) {
-      for (j in which(is.na(data[i,]))) {
-        distances <- distance_matrix[i, -i]
-        # Exclude rows that also have missing in the j-th variable
-        valid_donors <- which(!is.na(data[-i, j]))
-        if (length(valid_donors) > 0) {
-          closest_complete_case_index <- valid_donors[which.min(distances[valid_donors])]
-          data[i, j] <- data[closest_complete_case_index, j]
-        }
-      }
-    }
-  }
-  return(data)
-}
-
-data_metacart_best <- dataset %>% select(all_of(hot_decking_vars))  %>% 
-    hot_deck_imputation_partial(distance_matrix)
+# Get matrices
+datasets_sampled_reduced <- datasets_sampled %>% select(articlestudy, domain, r_adj, se, all_of(mi_vars))
+imp <- mice(datasets_sampled_reduced, maxit=0, seed = 1526)
 
 
-impute_with_random_draw <- function(dataframe) {
-  for (col in names(dataframe)) {
-    missing_indices <- which(is.na(dataframe[[col]]))
-    if (length(missing_indices) > 0) {
-      non_missing_values <- dataframe[[col]][!is.na(dataframe[[col]])]
-      if (length(non_missing_values) > 0) {
-        dataframe[[col]][missing_indices] <- sample(non_missing_values, length(missing_indices), replace = TRUE)
-      }
-    }
-  }
-  return(dataframe)
-}
+# Set variables of interest to be predicted by each other, all others ignored
+preds <- imp$predictorMatrix
+preds[] <- 0  
+preds[mi_vars, mi_vars] <- 1
 
-# Assuming 'your_dataframe' is your data frame with missing values
-data_metacart_worst <- dataset %>% select(all_of(hot_decking_vars))  %>% 
-    impute_with_random_draw()
+# Use other model variables in MI model
+preds[mi_vars, "r_adj"] <- 1
+preds[mi_vars, "se"] <- 1
+
+methods <- imp$method
+
+# Use pmm for factors with many levels
+methods[c("ind_sector", "team_function", "country", "sub_dom")] <- "pmm"
+methods[!names(methods) %in% mi_vars] <- ""
+methods["sub_dom"] <- "imp_sub_domain"
+methods[methods == "polr"] <- "best_polr"
+
+
+# Note that the functions here use column names from predict to determine imputation values
+# This can lead to issues with imputed valued that should contain blanks or special characters - in those cases, would need to refine code
+imp <- mice(datasets_sampled_reduced, m = 1, seed = 1526, predictorMatrix = preds, 
+            method = methods, donors = 1)  
+
+imp2 <- mice(dataset_red, m = 1, seed = 1526, predictorMatrix = preds2, 
+            method = methods2, donors = 1)  
+
 
 ```
 
