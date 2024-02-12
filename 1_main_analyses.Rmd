@@ -13,9 +13,15 @@ output:
 Author: Lukas Wallrich 
 ---
 
+*Credits:* This code builds on the [RMarkdown template for Correlational studies meta-analysis in Psychology](https://osf.io/f85uy/), developed by Adrien Fillon and Gilad Feldman. 
+
+
 ```{r setup, include=FALSE}
+## This block ...
+## ... loads, merges and renames the dataset
+
 if (!require(groundhog)) install.packages('groundhog')
-groundhog::groundhog.library(c("readxl", "TOSTER", "metafor", "tidyverse", "clubSandwich", "cli", "rsprite2", "esc",
+groundhog::groundhog.library(c("readxl", "metaforest", "metafor", "tidyverse", "clubSandwich", "cli", "rsprite2", "esc",
                                "mice", "metacart", "gt", "gtExtras", "psych"), date = "2023-07-09")
 
 # Need more recent version of patchwork due to faceting bug
@@ -23,13 +29,11 @@ groundhog::groundhog.library(c("sf", "rworldmap", "numform", "patchwork"), date 
 
 groundhog::groundhog.library(c("lukaswallrich/timesaveR"), date = "2023-07-09")
 
+# Avoid namespace clash with metaforest
+coef_test <- clubSandwich::coef_test
+
 source("helpers/helpers.R")
 
-```
-
-*Credits:* This code builds on the [RMarkdown template for Correlational studies meta-analysis in Psychology](https://osf.io/f85uy/), developed by Adrien Fillon and Gilad Feldman. 
-
-```{r importfile, include=FALSE}
 # Read M/SD as character to retain trailing 0s for GRIM/GRIMMER
 col_types_en <- c(rep("?", 56), rep("_", 8))
 col_types_en[c(3, 33:35, 42:45)] <- "c"
@@ -70,11 +74,7 @@ effect_sizes_n_en <- googlesheets4::read_sheet("https://docs.google.com/spreadsh
 
 # Assumed correlation between dependent effect sizes
 rho <- 0.6
-```
 
-
-
-```{r merge-effects, include=FALSE}
 # Rename variables
 rename_vec_en <- c(
   NULL = "double coded",
@@ -246,7 +246,275 @@ dataset$language[dataset$language == "Chinese"] <- "chinese"
 
 ```
 
-## Sample description
+## Check for retractions
+
+```{r}
+# Updated last on 10 Feb 24
+if (FALSE) {
+  download.file("https://api.labs.crossref.org/data/retractionwatch?l.wallrich@bbk.ac.uk", "data/retractions.csv")
+}
+
+retracted <- read_csv("data/retractions.csv")
+
+refs_en <- googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1pEYZUZvFr8qmULT077y932BUShpJvhs-asRuyyiBKlQ/edit#gid=1628922200", 
+                                             sheet = "Refs",
+                                             skip = 5)
+
+refs_n_en <- googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1XCjlC3u7Ws2KCjaRQ1R0VuU0mLQ5mHVipmzuGtivLCs/edit#gid=1553069535", 
+                                             sheet = "Refs",
+                                             skip = 1)
+
+intersect(refs_en$DOI %>% str_to_lower() %>% str_trim(), retracted$OriginalPaperDOI %>% str_to_lower() %>% str_trim())
+intersect(refs_n_en$DOI %>% str_to_lower() %>% str_trim(), retracted$OriginalPaperDOI %>% str_to_lower() %>% str_trim())
+```
+
+None of the included articles were retracted as per Retraction Watch's database, as [available from Crossref](https://api.labs.crossref.org/data/retractionwatch?l.wallrich@bbk.ac.uk) on 10 February 2024.
+
+## Estimate 'corrected' correlations and standard errors
+
+### Effective sample sizes
+
+Largest sample sizes associated with studies that sampled outputs produced by teams (e.g., patents, Wikipedia articles and academic publications) rather than teams. Multiple of these may be created by the same team and frequently teams will overlap. Nevertheless, they provide relevant data based on large samples, so that we wanted to include them. As there is no systematic way to estimate how many independent teams these represent, the sample sizes were windsorized to the largest sample size representing independent teams. This affected `r dataset %>% filter(n_obs == "OUTPUTS") %>% pull(id) %>% unique() %>% length()` studies.
+
+```{r}
+dataset$n_teams_coded <- dataset$n_teams
+
+other_dataset <-  dataset %>% filter(is.na(n_obs) | n_obs != "OUTPUTS") 
+max_sample <- max(other_dataset$n_teams)
+
+# TK - keep relative weights in case of multiple sub-group comparisons?
+adj_dataset <-  dataset %>% filter(n_obs == "OUTPUTS") %>% 
+  rowwise() %>% 
+  mutate(n_teams = min(n_teams, max_sample)) %>% 
+  ungroup()
+
+dataset <- bind_rows(other_dataset, adj_dataset)
+```
+
+Many more studies relied on multiple observations of the same teams, e.g, seasons for sports-teams and years for firms. These observations are evidently dependent, so that the number of observations cannot be treated as the effective sample size. Meta-analyses in business psychology rarely address this issue explicitly, and sometimes appear to treat observations from panel data as independent - yet that can give excessive weight to studies based on a low number of independent clusters. Instead, this needs to be corrected for the auto-correlation. This is rarely reported in the papers considered, so had to be assumed based on available data.
+
+For sports teams, we identified two sources that reported year-on-year correlations, reporting r = .72 for the season-to-season win percentage in the NBA (Landis, 2001), and r = .64 for the season-to-season goal difference in the German Bundesliga (calculated based on Ben-Ner et al., 2017). Therefore, we assumed a year-on-year correlation of .7 for repeated observations of sports teams.
+
+For year-on-year company performance, we consistently identified lower correlations, specifically:
+- Return on assets (logged): .43 (Hambrick et al., 2014)
+- Return on assets (Rickley et al., 2021): .54
+Therefore, we assumed a year-on-year correlation of .5 for repeated measures of corporate and team performance.
+
+However, for specific operational measures, the correlation is likely to be substantially different and likely higher. For instance, Pegels et al (2000) report that airline's load factor had a year-on-year correlation of .96. Similarly, Zouaghi et al. (2020) measured R&D performance every year based on whether an innovative product had been introduced in the previous 3 years, which will evidently correlate strongly due to the measurement choice, regardless of underlying autocorrelation. Therefore, we only considered the number of independent observations in such cases. 
+
+After that, we calculated the effective sample size per observation using the common formula provided by the Stan Development Team [(2024)](https://mc-stan.org/docs/reference-manual/effective-sample-size.html), where N refers to the number of observations per observed team, r to the correlation between adjacent time-points and N* to the effective sample size per team.
+
+
+??? (and minimum 1)
+
+$$
+N^* = max(\frac{N}{1 + 2 \times r}, 1)
+$$
+
+
+```{r}
+other_dataset <- dataset %>% filter(is.na(n_obs) | str_detect(n_obs, "EXCL|OUTPUTS") | !team_function %in% c("Management", "Sports players"))
+
+adj_dataset <- dataset %>% filter(!is.na(n_obs), !str_detect(n_obs, "EXCL|OUTPUTS"), team_function %in% c("Management", "Sports players")) %>% 
+  mutate(scale = case_when(
+      team_function == "Management" ~ (1 + 2 * 0.5),
+      team_function == "Sports players" ~ (1 + 2 * 0.7)
+      ),
+         n_each = as.numeric(gsub("[^0-9.]+", "", n_obs)) / n_teams,
+         n_teams = n_teams * pmax(1, n_each * scale)) %>% 
+  select(-scale, -n_each)
+                  
+dataset <- bind_rows(other_dataset, adj_dataset)
+
+```
+
+
+### Correction for attenuation
+
+
+```{r}
+
+# Calculate r from other measures
+# Formulae taken from Polanin & Snilsveit (Campbell SR, DOI: 10.4073/cmpn.2016.3)
+
+d_to_r <- function(d, n1 = NULL, n2 = NULL, n = NULL) {
+  # If only n is provided, equal group sizes are assumed (done throughout this MA)
+  if (is.null(n1) && is.null(n2)) {n1 = n/2; n2 = n/2}
+  a <- (n1 + n2)^2 / (n1 * n2)
+  r <- d / sqrt(d^2 + a)
+  return(r)
+}
+
+OR_to_r <- function(OR, n1 = NULL, n2 = NULL, n = NULL) {
+  # If only n is provided, equal group sizes are assumed (done throughout this MA)
+  if (is.null(n1) && is.null(n2)) {n1 = n/2; n2 = n/2}
+  a <- (n1 + n2)^2 / (n1 * n2)
+  r <- (log(OR) * (sqrt(3)/pi)) / sqrt((log(OR) * (sqrt(3)/pi)) + a)
+  return(r)
+}
+
+calculate_es <- function(row) {
+  if (!is.na(row$r)) return(row$r %>% as.numeric())
+  if (!is.na(row$d)) return(d_to_r(row$d %>% as.numeric(), n = row$n_teams))
+  if (!is.na(row$other)) {
+    if (str_detect(row$other, "OR")) {
+      return(OR_to_r(str_extract(row$other, "\\d*\\.\\d+") %>% as.numeric(), n = row$n_teams))
+    } else {
+      message("Challenge in ", row$id, " row: ", row$effect_id)
+      return(NA)
+    }
+  }
+}
+
+dataset <- dataset %>% rowwise() %>% 
+  mutate(r_rep = calculate_es(pick(everything()))) %>% 
+  ungroup()
+
+
+# Transform special reliabilities
+# For 2-item scale, Cronbachs alpha is (2 * r) / (1 + r), so that can be directly converted
+# Expect 'NAs introduced by coercion' warnings from case_when (https://github.com/tidyverse/dplyr/issues/6250)
+
+dataset <- dataset %>%
+  mutate(
+    reliab_div_reported = reliab_div,
+    reliab_perf_reported = reliab_perf,
+    across(
+      .cols = c(reliab_div, reliab_perf),
+      .fns = list(
+        type = ~case_when(
+          is.na(.) ~ NA_character_,
+          str_detect(., "^[0-9.]+$") ~ "cronbach",
+          str_detect(., "CR") ~ "comp_reliab_other",
+          str_detect(., "r =") ~ "r",
+          str_detect(., "ICC|interrater|IRR") ~ "ICC_interrater",
+          str_detect(., "[0-9]") ~ "other",
+          TRUE ~ "other"
+        ),
+        conv = ~case_when(
+          str_detect(., "^[0-9.]+$") ~ as.numeric(.),
+          str_detect(., "CR") ~ as.numeric(str_extract(., "[0-9.]+")),
+          str_detect(., "r =") ~ {
+            r_value <- as.numeric(str_extract(., "(?<=r = ?)[0-9.]+"))
+            (2 * r_value) / (1 + r_value)
+          },
+          str_detect(., "ICC|interrater|IRR") ~ as.numeric(str_extract(., "[0-9.]+")),
+          str_detect(., "[0-9]") ~ as.numeric(str_extract(., "[0-9.]+")),
+          TRUE ~ NA_real_
+        )
+      )
+    )
+  )
+
+# Impute missing reliabilities
+div_scale_terciles <- quantile(dataset$items_div %>% unique() %>% setdiff(c(1, NA)), c(.33, .66), na.rm = TRUE)
+perf_scale_terciles <- quantile(dataset$items_perf %>% unique() %>% setdiff(c(1, NA)), c(.33, .66), na.rm = TRUE)
+
+dataset <- dataset %>%
+  mutate(div_tercile = cut(dataset$items_div, breaks = c(1, div_scale_terciles, Inf), labels = c(1, 2, 3), include.lowest = FALSE),
+         perf_tercile = cut(dataset$items_perf, breaks = c(1, perf_scale_terciles, Inf), labels = c(1, 2, 3), include.lowest = FALSE)
+) 
+
+div_reliabilities <-  split(dataset$reliab_div_conv, dataset$div_tercile) %>% map(na.omit)
+perf_reliabilities <- split(dataset$reliab_perf_conv, dataset$perf_tercile) %>% map(na.omit)
+
+sample_reliab <- function(x, items, type, tercile) {
+  if (!is.na(x)) return(x)
+  if (is.na(items)) {cat(str_sub(type,1,1)); return(1)} # When both reliability and number of items are missing, no basis for adjustment
+  if (items == 1) return(1)
+  if (type == "div") {
+    return(sample(div_reliabilities[[as.character(tercile)]], 1))
+  }
+  if (type == "perf") {
+    return(sample(perf_reliabilities[[as.character(tercile)]], 1))
+  }
+  stop("Flow logic error in ", type)
+}
+
+#TK: consider need for team-size capping (would need to happen here)
+#TK: consider whether reliabilities should come from sub-categories (for diversity) - 
+# challenge: almost all cognitive, so little variance for others
+
+set.seed(1347)
+
+dataset <- dataset %>% rowwise() %>% 
+  mutate(
+  reliab_div = sample_reliab(reliab_div_conv, 
+                             items_div, "div", div_tercile),
+  reliab_perf = sample_reliab(reliab_perf_conv, 
+                             items_perf, "perf", perf_tercile)
+  ) %>% ungroup() %>% 
+  mutate(r_adj = r_rep / (sqrt(reliab_div) * sqrt(reliab_div)),
+         se =  sqrt((1 - r_rep^2) / (n_teams - 2)),
+         r_scale = ifelse(r_adj == 0, 1, r_adj/r_rep),
+         var_adj = se ^ 2 * (r_scale)^2) %>% 
+  select(-r_scale)
+
+# Cap adjusted rs to +/- 1 ... more extreme values only arise in tiny samples due to sampling error,
+# and maintaining them only increases overall error
+
+dataset <- dataset %>% mutate(r_adj = pmin(pmax(-1, r_adj), 1))
+
+```
+## Add moderators
+
+```{r add-moderator-data}
+if (!file.exists("data/hofstede.csv")) {
+  download.file("https://geerthofstede.com/wp-content/uploads/2016/08/6-dimensions-for-website-2015-08-16.csv", "data/hofstede.csv")
+}
+
+hofstede <- read_delim("data/hofstede.csv", delim = ";", na = "#NULL!", show_col_types = FALSE) %>% 
+  transmute(country, power_distance = pdi, collectivism = 100 - idv)
+
+# Some names in Hofstede differ
+# Data for Sri Lanka & Kazakhstan not available, so remains missing
+hofstede_map <- c(
+  "United States" = "U.S.A.", 
+  "Hong Kong SAR China" = "Hong Kong", 
+  "South Korea" = "Korea South", 
+  "United Kingdom" = "Great Britain",
+  "Cameroon" = "Africa West",  # where only regional data is available, used that
+  "United Arab Emirates" = "Arab countries",  
+  "Kuwait" = "Arab countries"
+)
+
+#TK: consider adding regional composites for few-country samples?
+
+dataset <- dataset %>% 
+  mutate(hofstede_match = ifelse(country %in% names(hofstede_map), hofstede_map[country %>% as.character()], country %>% as.character()) %>%  factor()) %>% 
+  left_join(hofstede, by = c("hofstede_match" = "country")) %>% 
+  select(-hofstede_match)
+
+citation_counts <- bind_rows(read_excel("data/citation_data_en.xlsx") %>% distinct(),
+                             read_excel("data/citation_data_nen.xlsx") %>% distinct()) %>% 
+  mutate(citation_count = coalesce(citation_count, citations))
+                             
+
+dataset <- dataset %>% 
+  left_join(
+    citation_counts %>% select(id = ID, citation_count)
+  )
+
+# NAs in citation count indicate that these entries could not be found on Google Scholar - thus they have 0 Google Scholar citations.
+dataset <- dataset %>% 
+  mutate(citation_count = replace_na(citation_count, 0))
+
+
+if (is.list(dataset$year_coll)) {
+  dataset <- dataset %>%
+      mutate(year_coll = null_to_NA(year_coll))
+} 
+  dataset <- dataset %>%
+      mutate(year_coll_mean = ifelse(str_detect(year_coll, "–|-"),
+                                sapply(str_split(year_coll, "–|-"), 
+                                       function(x) mean(as.numeric(x))),
+                                as.numeric(year_coll)),
+             year_merged = coalesce(year_coll_mean,
+                                year))
+  
+```
+
+# Sample description
 
 ### Global distribution
 
@@ -680,192 +948,6 @@ final_table %>%
 ```
 
 
-## Estimate 'corrected' correlations and standard errors
-
-### Effective sample sizes
-
-Largest sample sizes associated with studies that sampled outputs produced by teams (e.g., patents, Wikipedia articles and academic publications) rather than teams. Multiple of these may be created by the same team and frequently teams will overlap. Nevertheless, they provide relevant data based on large samples, so that we wanted to include them. As there is no systematic way to estimate how many independent teams these represent, the sample sizes were windsorized to the largest sample size representing independent teams. This affected `r dataset %>% filter(n_obs == "OUTPUTS") %>% pull(id) %>% unique() %>% length()` studies.
-
-```{r}
-dataset$n_teams_coded <- dataset$n_teams
-
-other_dataset <-  dataset %>% filter(is.na(n_obs) | n_obs != "OUTPUTS") 
-max_sample <- max(other_dataset$n_teams)
-
-# TK - keep relative weights in case of multiple sub-group comparisons?
-adj_dataset <-  dataset %>% filter(n_obs == "OUTPUTS") %>% 
-  rowwise() %>% 
-  mutate(n_teams = min(n_teams, max_sample)) %>% 
-  ungroup()
-
-dataset <- bind_rows(other_dataset, adj_dataset)
-```
-
-Many more studies relied on multiple observations of the same teams, e.g, seasons for sports-teams and years for firms. These observations are evidently dependent, so that the number of observations cannot be treated as the effective sample size. Meta-analyses in business psychology rarely address this issue explicitly, and sometimes appear to treat observations from panel data as independent - yet that can give excessive weight to studies based on a low number of independent clusters. Instead, this needs to be corrected for the auto-correlation. This is rarely reported in the papers considered, so had to be assumed based on available data.
-
-For sports teams, we identified two sources that reported year-on-year correlations, reporting r = .72 for the season-to-season win percentage in the NBA (Landis, 2001), and r = .64 for the season-to-season goal difference in the German Bundesliga (calculated based on Ben-Ner et al., 2017). Therefore, we assumed a year-on-year correlation of .7 for repeated observations of sports teams.
-
-For year-on-year company performance, we consistently identified lower correlations, specifically:
-- Return on assets (logged): .43 (Hambrick et al., 2014)
-- Return on assets (Rickley et al., 2021): .54
-Therefore, we assumed a year-on-year correlation of .5 for repeated measures of corporate and team performance.
-
-However, for specific operational measures, the correlation is likely to be substantially different and likely higher. For instance, Pegels et al (2000) report that airline's load factor had a year-on-year correlation of .96. Similarly, Zouaghi et al. (2020) measured R&D performance every year based on whether an innovative product had been introduced in the previous 3 years, which will evidently correlate strongly due to the measurement choice, regardless of underlying autocorrelation. Therefore, we only considered the number of independent observations in such cases. 
-
-After that, we calculated the effective sample size per observation using the common formula provided by the Stan Development Team [(2024)](https://mc-stan.org/docs/reference-manual/effective-sample-size.html), where N refers to the number of observations per observed team, r to the correlation between adjacent time-points and N* to the effective sample size per team.
-
-
-??? (and minimum 1)
-
-$$
-N^* = max(\frac{N}{1 + 2 \times r}, 1)
-$$
-
-
-```{r}
-other_dataset <- dataset %>% filter(is.na(n_obs) | str_detect(n_obs, "EXCL|OUTPUTS") | !team_function %in% c("Management", "Sports players"))
-
-adj_dataset <- dataset %>% filter(!is.na(n_obs), !str_detect(n_obs, "EXCL|OUTPUTS"), team_function %in% c("Management", "Sports players")) %>% 
-  mutate(scale = case_when(
-      team_function == "Management" ~ (1 + 2 * 0.5),
-      team_function == "Sports players" ~ (1 + 2 * 0.7)
-      ),
-         n_each = as.numeric(gsub("[^0-9.]+", "", n_obs)) / n_teams,
-         n_teams = n_teams * pmax(1, n_each * scale)) %>% 
-  select(-scale, -n_each)
-                  
-dataset <- bind_rows(other_dataset, adj_dataset)
-
-```
-
-
-### Correction for attenuation
-
-
-```{r}
-
-# Calculate r from other measures
-# Formulae taken from Polanin & Snilsveit (Campbell SR, DOI: 10.4073/cmpn.2016.3)
-
-d_to_r <- function(d, n1 = NULL, n2 = NULL, n = NULL) {
-  # If only n is provided, equal group sizes are assumed (done throughout this MA)
-  if (is.null(n1) && is.null(n2)) {n1 = n/2; n2 = n/2}
-  a <- (n1 + n2)^2 / (n1 * n2)
-  r <- d / sqrt(d^2 + a)
-  return(r)
-}
-
-OR_to_r <- function(OR, n1 = NULL, n2 = NULL, n = NULL) {
-  # If only n is provided, equal group sizes are assumed (done throughout this MA)
-  if (is.null(n1) && is.null(n2)) {n1 = n/2; n2 = n/2}
-  a <- (n1 + n2)^2 / (n1 * n2)
-  r <- (log(OR) * (sqrt(3)/pi)) / sqrt((log(OR) * (sqrt(3)/pi)) + a)
-  return(r)
-}
-
-calculate_es <- function(row) {
-  if (!is.na(row$r)) return(row$r %>% as.numeric())
-  if (!is.na(row$d)) return(d_to_r(row$d %>% as.numeric(), n = row$n_teams))
-  if (!is.na(row$other)) {
-    if (str_detect(row$other, "OR")) {
-      return(OR_to_r(str_extract(row$other, "\\d*\\.\\d+") %>% as.numeric(), n = row$n_teams))
-    } else {
-      message("Challenge in ", row$id, " row: ", row$effect_id)
-      return(NA)
-    }
-  }
-}
-
-dataset <- dataset %>% rowwise() %>% 
-  mutate(r_rep = calculate_es(pick(everything()))) %>% 
-  ungroup()
-
-
-# Transform special reliabilities
-# For 2-item scale, Cronbachs alpha is (2 * r) / (1 + r), so that can be directly converted
-# Expect 'NAs introduced by coercion' warnings from case_when (https://github.com/tidyverse/dplyr/issues/6250)
-
-dataset <- dataset %>%
-  mutate(
-    reliab_div_reported = reliab_div,
-    reliab_perf_reported = reliab_perf,
-    across(
-      .cols = c(reliab_div, reliab_perf),
-      .fns = list(
-        type = ~case_when(
-          is.na(.) ~ NA_character_,
-          str_detect(., "^[0-9.]+$") ~ "cronbach",
-          str_detect(., "CR") ~ "comp_reliab_other",
-          str_detect(., "r =") ~ "r",
-          str_detect(., "ICC|interrater|IRR") ~ "ICC_interrater",
-          str_detect(., "[0-9]") ~ "other",
-          TRUE ~ "other"
-        ),
-        conv = ~case_when(
-          str_detect(., "^[0-9.]+$") ~ as.numeric(.),
-          str_detect(., "CR") ~ as.numeric(str_extract(., "[0-9.]+")),
-          str_detect(., "r =") ~ {
-            r_value <- as.numeric(str_extract(., "(?<=r = ?)[0-9.]+"))
-            (2 * r_value) / (1 + r_value)
-          },
-          str_detect(., "ICC|interrater|IRR") ~ as.numeric(str_extract(., "[0-9.]+")),
-          str_detect(., "[0-9]") ~ as.numeric(str_extract(., "[0-9.]+")),
-          TRUE ~ NA_real_
-        )
-      )
-    )
-  )
-
-# Impute missing reliabilities
-div_scale_terciles <- quantile(dataset$items_div %>% unique() %>% setdiff(c(1, NA)), c(.33, .66), na.rm = TRUE)
-perf_scale_terciles <- quantile(dataset$items_perf %>% unique() %>% setdiff(c(1, NA)), c(.33, .66), na.rm = TRUE)
-
-dataset <- dataset %>%
-  mutate(div_tercile = cut(dataset$items_div, breaks = c(1, div_scale_terciles, Inf), labels = c(1, 2, 3), include.lowest = FALSE),
-         perf_tercile = cut(dataset$items_perf, breaks = c(1, perf_scale_terciles, Inf), labels = c(1, 2, 3), include.lowest = FALSE)
-) 
-
-div_reliabilities <-  split(dataset$reliab_div_conv, dataset$div_tercile) %>% map(na.omit)
-perf_reliabilities <- split(dataset$reliab_perf_conv, dataset$perf_tercile) %>% map(na.omit)
-
-sample_reliab <- function(x, items, type, tercile) {
-  if (!is.na(x)) return(x)
-  if (is.na(items)) {cat(str_sub(type,1,1)); return(1)} # When both reliability and number of items are missing, no basis for adjustment
-  if (items == 1) return(1)
-  if (type == "div") {
-    return(sample(div_reliabilities[[as.character(tercile)]], 1))
-  }
-  if (type == "perf") {
-    return(sample(perf_reliabilities[[as.character(tercile)]], 1))
-  }
-  stop("Flow logic error in ", type)
-}
-
-#TK: consider need for team-size capping (would need to happen here)
-#TK: consider whether reliabilities should come from sub-categories (for diversity) - 
-# challenge: almost all cognitive, so little variance for others
-
-set.seed(1347)
-
-dataset <- dataset %>% rowwise() %>% 
-  mutate(
-  reliab_div = sample_reliab(reliab_div_conv, 
-                             items_div, "div", div_tercile),
-  reliab_perf = sample_reliab(reliab_perf_conv, 
-                             items_perf, "perf", perf_tercile)
-  ) %>% ungroup() %>% 
-  mutate(r_adj = r_rep / (sqrt(reliab_div) * sqrt(reliab_div)),
-         se =  sqrt((1 - r_rep^2) / (n_teams - 2)),
-         r_scale = ifelse(r_adj == 0, 1, r_adj/r_rep),
-         var_adj = se ^ 2 * (r_scale)^2) %>% 
-  select(-r_scale)
-
-# Cap adjusted rs to +/- 1 ... more extreme values only arise in tiny samples due to sampling error,
-# and maintaining them only increases overall error
-
-dataset <- dataset %>% mutate(r_adj = pmin(pmax(-1, r_adj), 1))
-
-```
 
 
 # Main meta-analysis
@@ -1121,66 +1203,6 @@ ggplot(aes(x = specification, y = value, color = color)) +
 
 # Meta-regression
 
-
-## Prepare moderators
-
-```{r add-moderator-data}
-if (!file.exists("data/hofstede.csv")) {
-  download.file("https://geerthofstede.com/wp-content/uploads/2016/08/6-dimensions-for-website-2015-08-16.csv", "data/hofstede.csv")
-}
-
-hofstede <- read_delim("data/hofstede.csv", delim = ";", na = "#NULL!", show_col_types = FALSE) %>% 
-  transmute(country, power_distance = pdi, collectivism = 100 - idv)
-
-# Some names in Hofstede differ
-# Data for Sri Lanka & Kazakhstan not available, so remains missing
-hofstede_map <- c(
-  "United States" = "U.S.A.", 
-  "Hong Kong SAR China" = "Hong Kong", 
-  "South Korea" = "Korea South", 
-  "United Kingdom" = "Great Britain",
-  "Cameroon" = "Africa West",  # where only regional data is available, used that
-  "United Arab Emirates" = "Arab countries",  
-  "Kuwait" = "Arab countries"
-)
-
-#TK: consider adding regional composites for few-country samples?
-
-dataset <- dataset %>% 
-  mutate(hofstede_match = ifelse(country %in% names(hofstede_map), hofstede_map[country %>% as.character()], country %>% as.character()) %>%  factor()) %>% 
-  left_join(hofstede, by = c("hofstede_match" = "country")) %>% 
-  select(-hofstede_match)
-
-citation_counts <- bind_rows(read_excel("data/citation_data_en.xlsx") %>% distinct(),
-                             read_excel("data/citation_data_nen.xlsx") %>% distinct()) %>% 
-  mutate(citation_count = coalesce(citation_count, citations))
-                             
-
-dataset <- dataset %>% 
-  left_join(
-    citation_counts %>% select(id = ID, citation_count)
-  )
-
-# NAs in citation count indicate that these entries could not be found on Google Scholar - thus they have 0 Google Scholar citations.
-dataset <- dataset %>% 
-  mutate(citation_count = replace_na(citation_count, 0))
-
-
-if (is.list(dataset$year_coll)) {
-  dataset <- dataset %>%
-      mutate(year_coll = null_to_NA(year_coll))
-} 
-  dataset <- dataset %>%
-      mutate(year_coll_mean = ifelse(str_detect(year_coll, "–|-"),
-                                sapply(str_split(year_coll, "–|-"), 
-                                       function(x) mean(as.numeric(x))),
-                                as.numeric(year_coll)),
-             year_merged = coalesce(year_coll_mean,
-                                year))
-  
-sum(is.na(dataset$year_merged))
-
-```
 
 ## Impute data
 
@@ -1849,7 +1871,7 @@ mi_vars <- c("art_focus", "pub_status", "design", "setting", "ind_sector", "team
              "tmt", "domain", "sub_dom", "meas_type", "rater", "interdep", "complexity", "longevity", "power_distance",
              "collectivism", "year_merged", "citation_count")
 
-datasets_sampled_reduced <- datasets_sampled %>% select(articlestudy, domain, r_adj, se, all_of(mi_vars))
+datasets_sampled_reduced <- datasets_sampled %>% select(articlestudy, domain, r_adj, se, var_adj, all_of(mi_vars))
 
 ### Impute BEST version
 
@@ -1972,21 +1994,171 @@ for (domain in names(datasets_sampled_reduced_random_split)) {
 datasets_sampled_reduced_random <- bind_rows(datasets_sampled_reduced_random_split)
 ```
 
+## Run meta-CART
+
+Despite the description of the method as not requiring variable selection, model convergence depends on the variables included during estimation. We will therefore fit all possible models and aggregate results later.
+
 ```{r}
-REmrt(r_adj ~ year_merged + complexity + interdep + collectivism + 
-                                 longevity + meas_type + rater + design + art_focus,
-      datasets_sampled_reduced_best,
-      vi = ,
-      c = .5)
+datasets_sampled_reduced_best$art_focus <- datasets_sampled_reduced_best$art_focus %>% relevel(ref = "descriptive")
+
+mods <- c("domain", "year_merged", "complexity", "interdep", "collectivism", "longevity", "meas_type", "rater", "design", "art_focus")
+
+all_subsets <- lapply(10:1, function(size) {
+  combn(mods, size, simplify = FALSE)
+})
+
+if (file.exist("cached_results/cart_trees_best_imp.RDS")) {
+  trees <- read_rds("cached_results/cart_trees_best_imp.RDS")
+} else {
+  trees <- list()
+
+  for (cmb in all_subsets) {
+    for (cur_mods in cmb) {
+      # Provide intermittent progress update
+      if (length(trees) %% 50 == 0) message("Fitting tree ", length(trees))
+      preds <- paste0(cur_mods, collapse = " + ")
+
+      if (!is.null(trees[[preds %>% str_replace_all(" \\+ ", "__")]])) next
+
+      trees[preds %>% str_replace_all(" \\+ ", "__")] <- list(REmrt(as.formula(paste0("r_adj ~ ", preds)),
+        datasets_sampled_reduced_best,
+        vi = var_adj,
+        c = 0,
+        maxL = 20
+      ))
+    }
+  }
+
+  write_rds(trees, "cached_results/cart_trees_best_imp.RDS")
+}
+
+if (file.exists("cached_results/cart_trees_ahead_best_imp.RDS")) {
+  trees_ahead <- read_rds("cached_results/cart_trees_ahead_best_imp.RDS")
+} else {
+  trees_ahead <- list()
+
+  for (cmb in all_subsets) {
+    for (cur_mods in cmb) {
+      # Provide intermittent progress update
+      if (length(trees_ahead) %% 50 == 0) message("Fitting lookahead tree ", length(trees_ahead))
+      preds <- paste0(cur_mods, collapse = " + ")
+
+      if (!is.null(trees_ahead[[preds %>% str_replace_all(" \\+ ", "__")]])) next
+
+      # In special cases (with single predictor), lookahead = TRUE can fail - 
+      # in these cases, we will not store the result. Bug was reported to package maintainers.
+      trees_ahead[preds %>% str_replace_all(" \\+ ", "__")] <- list(tryCatch(REmrt(as.formula(paste0("r_adj ~ ", preds)),
+        datasets_sampled_reduced_best,
+        vi = var_adj,
+        c = 0,
+        maxL = 20,
+        lookahead = TRUE
+      ), error = function(e) NULL))
+    }
+  }
+
+  write_rds(trees_ahead, "cached_results/cart_trees_ahead_best_imp.RDS")
+}
+
 ```
 
+
+
+## Run metaforest on full single-imputed datasets
+
+```{r}
+install.packages("metaforest")
+library(metaforest)
+
+datasets_sampled_reduced_best <- datasets_sampled_reduced_best %>% 
+  group_by(articlestudy) %>% 
+  mutate(study_id = cur_group_id()) %>% 
+  ungroup()
+
+set.seed(1705)
+check_conv <- MetaForest(r_adj ~ domain + year_merged + complexity + interdep + collectivism + 
+                                 longevity + meas_type + rater + design + art_focus,
+                        data = datasets_sampled_reduced_best,
+                        study = "study_id",
+                        vi = "var_adj",
+                        whichweights = "random",
+                        num.trees = 20000)
+
+plot(check_conv)
+
+
+# Model with 5000 trees for replication
+mf_rep <- MetaForest(r_adj ~ domain + year_merged + complexity + interdep + collectivism + 
+                                 longevity + meas_type + rater + design + art_focus,
+                        data = datasets_sampled_reduced_best,
+                        study = "study_id",
+                        vi = "var_adj",
+                        whichweights = "random",
+                        num.trees = 5000)
+
+# Run recursive preselection, store results in object 'preselect'
+preselected <- preselect(mf_rep,
+                         replications = 100,
+                         algorithm = "recursive")
+# Plot the results
+plot(preselected)
+# Retain only moderators with positive variable importance in more than
+# 50% of replications
+retain_mods <- preselect_vars(preselected, cutoff = .5)
+
+# Load the caret library
+library(caret)
+# Set up 10-fold grouped (=clustered) CV
+grouped_cv <- trainControl(method = "cv", 
+                           index = groupKFold(datasets_sampled_reduced_best$study_id, k = 10))
+
+# Set up a tuning grid for the three tuning parameters of MetaForest
+tuning_grid <- expand.grid(whichweights = c("random", "fixed", "unif"),
+                       mtry = 2:6,
+                       min.node.size = 2:6)
+
+# X should contain only retained moderators, clustering variable, and vi
+X <- datasets_sampled_reduced_best[, c("study_id", "var_adj", retain_mods)] %>% rename(vi = var_adj)
+
+# Train the model
+mf_cv <- train(y = datasets_sampled_reduced_best$r_adj,
+               x = X,
+               study = "study_id",
+               method = ModelInfo_mf(), 
+               trControl = grouped_cv,
+               tuneGrid = tuning_grid,
+               num.trees = 5000)
+# Examine optimal tuning parameters
+mf_cv$results[which.min(mf_cv$results$RMSE), ]
+
+# For convenience, extract final model
+final <- mf_cv$finalModel
+# Extract R^2_{oob} from the final model
+r2_oob <- final$forest$r.squared
+# Plot convergence
+plot(final)
+
+# Plot variable importance
+VarImpPlot(final)
+# Sort the variable names by importance, so that the
+# partial dependence plots will be ranked by importance
+ordered_vars <- names(final$forest$variable.importance)[
+  order(final$forest$variable.importance, decreasing = TRUE)]
+# Plot partial dependence
+PartialDependence(final, vars = ordered_vars,
+                  rawdata = TRUE, pi = .95, alpha = .01)
+
+PartialDependence(final, vars = ordered_vars,
+                  rawdata = FALSE, pi = .95, alpha = .01)
+
+```
 
 # Publication bias
 
 ```{r}
 datasets_pub <- dataset %>% 
-  filter(`Publication status` == "Published") %>% 
-  split(.$Domain)
+  filter(pub_status == "Published") %>% 
+  split(.$domain)
 
 # Exploratory analysis - are *claims* about diversity shaped by publication bias?
 datasets_focal_pub <- dataset %>% 
@@ -1999,83 +2171,97 @@ datasets_focal_pub <- dataset %>%
 
 ## Funnel plots
 
-```{r}
-cur_data <- datasets_pub[[1]] 
+We used an Egger’s regression test to assess the asymmetry of the funnel plot, with Robust Variance Estimation (RVE) taking care of dependence between effect sizes. In order to strike an appropriate balance between statistical power and Type I errors, we followed the common practice highlighted by Siegel and colleagues (2021) and interpreted p-values below .1 as evidence for publication bias.
 
-# Create funnel plots with all data split by domain, coloring points grey, with `Publication status` == "Published" in mid blue and `Publication status` == "Published", `Article  focus` = "focal H" in dark blue
+Given that publication bias tests are assessments of what is reported in the literature, they are based on *unadjusted* correlation coefficients and standard errors.
+
+
+```{r}
+
+funnel_plots <- list()
+
+for (domain in names(datasets_pub)) {
+
+cur_data <- datasets_pub[[domain]] 
 
 # Load earlier estimate?
-estimate <-
-sd <-
+confidence_intervals
 
-# Now, compute vectors of the lower-limit and upper limit values for
-# the 95% CI region, using the range of SE that you generated in the previous step, and the stored value of your meta-analytic estimate.
-se.seq=seq(0, max(cur_data$r_adj), 0.001)
-ll95 = estimate-(1.96*se.seq)
-ul95 = estimate+(1.96*se.seq)
- 
-# You can do this for a 99% CI region too
-ll99 = estimate-(3.29*se.seq)
-ul99 = estimate+(3.29*se.seq)
- 
-# And finally, do the same thing except now calculating the confidence interval
-# for your meta-analytic estimate based on the stored value of its standard error
-meanll95 = estimate-(1.96*se)
-meanul95 = estimate+(1.96*se)
- 
+estimate <- confidence_intervals$beta[confidence_intervals$Coef == paste0("domain", domain)]
+se <- confidence_intervals$SE[confidence_intervals$Coef == paste0("domain", domain)]
+
+# Now, compute vectors of the lower-limit and upper limit values for the 95% CI around the metanalytic estimate
+se.seq = seq(0,  max(cur_data$se), 0.001)
+ll95 = estimate - (1.96*se.seq)
+ul95 = estimate + (1.96*se.seq)
+
+# And the various around 0
+ll95_0 = 0 - (1.96*se.seq)
+ul95_0 = 0 + (1.96*se.seq)
+ll90_0 = 0 - (1.65*se.seq)
+ul90_0 = 0 + (1.65*se.seq)
+ll99_0 = 0 - (2.58*se.seq)
+ul99_0 = 0 + (2.58*se.seq)
+
 # Now, smash all of those calculated values into one data frame (called 'dfCI').
-dfCI = data.frame(ll95, ul95, ll99, ul99, se.seq, estimate, meanll95, meanul95)
+dfCI <- data.frame(ll95, ul95, ll95_0, ul95_0, ll99_0, ul99_0, ll90_0, ul90_0, se.seq, estimate)
  
 # Add a color column to the dataset based on the specified criteria
-dataset$color <- ifelse(dataset$`Publication status` == "Published" & dataset$`Article focus` == "focal H", "dark blue",
-                        ifelse(dataset$`Publication status` == "Published", "mid blue", "grey"))
-
-# Make the funnel plot.
-fp <- ggplot(aes(y = se, x = Zr), data = dataset) +
-  geom_point(aes(color = color), shape = 1) +
-  scale_color_identity() +
-  xlab('Zr') + ylab('Standard Error') +
-  geom_line(aes(y = se.seq, x = ll95), linetype = 'dotted', data = dfCI) +
-  geom_line(aes(y = se.seq, x = ul95), linetype = 'dotted', data = dfCI) +
-  geom_line(aes(y = se.seq, x = ll99), linetype = 'dashed', data = dfCI) +
-  geom_line(aes(y = se.seq, x = ul99), linetype = 'dashed', data = dfCI) +
-  geom_segment(aes(y = min(se.seq), x = meanll95, yend = max(se.seq), xend = meanll95), linetype='dotted', data=dfCI) +
-  geom_segment(aes(y = min(se.seq), x = meanul95, yend = max(se.seq), xend = meanul95), linetype='dotted', data=dfCI) +
-  scale_x_continuous(breaks=seq(-1.25, 2, 0.25)) +
-  scale_x_reverse() +
-  timesaveR::theme_apa()
-
-```
+cur_data$color <- ifelse(cur_data$art_focus == "focal H", 
+                        "darkblue",
+                        "lightblue")
 
 
-## Egger's test
-
-we used an Egger’s regression test to assess the asymmetry of the funnel plot, with Robust Variance Estimation (RVE) taking care of dependence between effect sizes. In order to strike an appropriate balance between statistical power and Type I errors, we followed the common practice highlighted by Siegel and colleagues (2021) and interpreted p-values below .1 as evidence for publication bias.
-
-```{r}
-
-datasets_published <- dataset  %>% 
-    filter(pub_status == "Published")  %>%
-    split(.$diversity_domain)
-
-# Run Egger's test with Robust Variance Estimation
-
-eggers_tests <- map(datasets_published, \(cur_dataset) {
-    rho <- .6
-
-    V <- with(cur_dataset,
-            impute_covariance_matrix(vi = var_adj,
+   V <- with(cur_data,
+            impute_covariance_matrix(vi = se^2,
                                     cluster = articlestudy,
                                     r = rho))
 
-    egger_multi <- rma.mv(yi = adj_cor, V = V, random = ~ 1 | articlestudy, mods = ~ adj_se, data = cur_dataset)
-    coef_test(egger_multi, vcov = "CR2")
-})
+    egger_multi <- rma.mv(yi = r_rep, V = V, random = ~ 1 | articlestudy / effect_id, mods = ~ se, data = cur_data)
+    
+    
+    coefs <-  coef_test(egger_multi, vcov = "CR2")
+    
+    eggers_label <- glue::glue("Egger's regression test for {domain %>% tolower()} diversity: β = {round(coefs$beta[2], 2)}, *t*({round(coefs$df_Satt[2], 1)}) = {round(coefs$t[2], 2)}, *p* {fmt_p(coefs$p[2])}")
 
-# TK - figure out how to display and report
+fill_colors <- c("n.s." = "white", "*p* < .1" = "#90EE90", "*p* < .05" = "#32CD32", "*p* < .01" = "#006400")
+
+# Make the funnel plot.
+funnel_plots[domain] <- list(ggplot(data = cur_data) +
+  xlab('r') + ylab('Standard Error') +
+    annotate("rect", xmin = -1, xmax = 1, ymin = 0, ymax = max(dfCI$se.seq), fill = "#006400") +
+  geom_ribbon(data = dfCI, aes(xmin = ll99_0, xmax = ul99_0, y = se.seq, fill = "*p* < .05")) +
+  geom_ribbon(data = dfCI, aes(xmin = ll95_0, xmax = ul95_0, y = se.seq, fill = "*p* < .1" )) +
+geom_ribbon(data = dfCI, aes(xmin = ll90_0, xmax = ul90_0, y = se.seq, fill = "n.s.")) +
+  # Dummy layer for the annotated color
+  geom_ribbon(aes(y = 0, xmin = Inf, xmax = Inf, fill = "*p* < .01")) +
+
+    scale_fill_manual("Significance", values = fill_colors) + 
+    geom_point(aes(y = se, x = r_rep, color = color), alpha = .6) +
+  scale_color_identity() +
+  geom_line(aes(y = se.seq, x = ll95), linetype = 'dotted', linewidth = .5, data = dfCI) +
+  geom_line(aes(y = se.seq, x = ul95), linetype = 'dotted', linewidth = .5, data = dfCI) +
+  geom_line(aes(x = estimate, y = se_range),
+            data = tibble(estimate = estimate, se_range = c(0, max(dfCI$se.seq))),
+            linetype = 'dotted', color = 'darkblue', linewidth = .5) +
+  scale_x_continuous() +
+  coord_cartesian(xlim = c(-1, 1), ylim = c(max(dfCI$se.seq), 0), expand = FALSE) +
+  #scale_y_continuous(trans = "reverse", limits = c(0, -max(dfCI$se.seq))) + 
+  labs(title = paste0("Funnel plot for ", domain %>% str_remove("domain") %>% tolower(), " diversity"),
+       subtitle = "95% and 99% confidence intervals",
+       caption = eggers_label, x = "*r*", y = "Standard error") +
+    theme(plot.caption = ggtext::element_markdown(),
+          axis.title.x = ggtext::element_markdown(),
+          legend.text = ggtext::element_markdown(),
+          panel.grid = element_blank()))
+funnel_plots[domain]
+}
+
+
 
 ```
 
+No evidence that effect size is associated with standard error - so that positive results appear to be no more likely to be published than 
 
 ## 3 PSM
 
@@ -2096,7 +2282,8 @@ apply_3psm <- function(data) {
                 test = "knha")
     psm_mod <- selmodel(m.rma,
             type = "stepfun",
-            steps = 0.025)  
+            steps = 0.025,
+            alternative = "two.sided") # Selection for both positive and negative sig values  
     # Creating a dataframe with required elements
     df <- data.frame(
         #TK - fix these once based on metafor model
