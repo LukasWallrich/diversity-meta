@@ -22,7 +22,7 @@ Author: Lukas Wallrich
 
 if (!require(groundhog)) install.packages('groundhog')
 groundhog::groundhog.library(c("readxl", "metaforest", "metafor", "tidyverse", "clubSandwich", "cli", "rsprite2", "esc",
-                               "mice", "metacart", "gt", "gtExtras", "psych"), date = "2023-07-09")
+                               "mice", "metacart", "gt", "gtExtras", "psych", "furrr", "progressr"), date = "2023-07-09")
 
 # Need more recent version of patchwork due to faceting bug
 groundhog::groundhog.library(c("sf", "rworldmap", "numform", "patchwork"), date = "2023-07-09")
@@ -264,6 +264,19 @@ refs_n_en <- googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1
                                              sheet = "Refs",
                                              skip = 1)
 
+# Check whether references match final sample
+if (length(setdiff(dataset$id, c(refs_en$ID, refs_n_en$ID)))>0) {
+  print(paste0("Missing references: ", glue::glue_collapse(setdiff(dataset$id, c(refs_en$ID, refs_n_en$ID)), ", ")))
+}
+if (length(setdiff(c(refs_en$ID, refs_n_en$ID), dataset$id))>0) {
+  print(paste0("Excess references: ", glue::glue_collapse(setdiff(c(refs_en$ID, refs_n_en$ID), dataset$id), ", ")))
+}
+
+pdfs <- refs_en %>% select(ID, `File-name`) %>% 
+  bind_rows(refs_n_en  %>% select(ID, `File-name`)) %>% 
+  rename(id = ID, file_name = `File-name`) %>% 
+  mutate(id = map_chr(id, \(x) c(x, NA)[1]))
+
 intersect(refs_en$DOI %>% str_to_lower() %>% str_trim(), retracted$OriginalPaperDOI %>% str_to_lower() %>% str_trim())
 intersect(refs_n_en$DOI %>% str_to_lower() %>% str_trim(), retracted$OriginalPaperDOI %>% str_to_lower() %>% str_trim())
 ```
@@ -317,8 +330,8 @@ other_dataset <- dataset %>% filter(is.na(n_obs) | str_detect(n_obs, "EXCL|OUTPU
 
 adj_dataset <- dataset %>% filter(!is.na(n_obs), !str_detect(n_obs, "EXCL|OUTPUTS"), team_function %in% c("Management", "Sports players")) %>% 
   mutate(scale = case_when(
-      team_function == "Management" ~ (1 + 2 * 0.5),
-      team_function == "Sports players" ~ (1 + 2 * 0.7)
+      team_function == "Management" ~ 1 / (1 + 2 * 0.5),
+      team_function == "Sports players" ~ 1 / (1 + 2 * 0.7)
       ),
          n_each = as.numeric(gsub("[^0-9.]+", "", n_obs)) / n_teams,
          n_teams = n_teams * pmax(1, n_each * scale)) %>% 
@@ -2161,9 +2174,9 @@ datasets_pub <- dataset %>%
   split(.$domain)
 
 # Exploratory analysis - are *claims* about diversity shaped by publication bias?
-datasets_focal_pub <- dataset %>% 
-  filter(`Publication status` == "Published", `Article  focus` = "focal H") %>% 
-  split(.$Domain)
+datasets_pub_focal <- dataset %>% 
+  filter(pub_status == "Published", art_focus == "focal H") %>% 
+  split(.$domain)
 ```
 
 
@@ -2175,6 +2188,7 @@ We used an Egger’s regression test to assess the asymmetry of the funnel plot,
 
 Given that publication bias tests are assessments of what is reported in the literature, they are based on *unadjusted* correlation coefficients and standard errors.
 
+TK: Consider use of sample size rather than standard error (as standard error depends on the effect size, and has therefore been criticised as a measure of precision here) - or of z-values instead of r? However, that deviates from standard Egger's regression tests, so would need to be exploratory
 
 ```{r}
 
@@ -2222,7 +2236,7 @@ cur_data$color <- ifelse(cur_data$art_focus == "focal H",
     
     coefs <-  coef_test(egger_multi, vcov = "CR2")
     
-    eggers_label <- glue::glue("Egger's regression test for {domain %>% tolower()} diversity: β = {round(coefs$beta[2], 2)}, *t*({round(coefs$df_Satt[2], 1)}) = {round(coefs$t[2], 2)}, *p* {fmt_p(coefs$p[2])}")
+    eggers_label <- glue::glue("Egger's regression test for {domain %>% tolower()} diversity (with RVE): β = {round(coefs$beta[2], 2)}, *t*({round(coefs$df_Satt[2], 1)}) = {round(coefs$t[2], 2)}, *p* {fmt_p(coefs$p[2])}")
 
 fill_colors <- c("n.s." = "white", "*p* < .1" = "#90EE90", "*p* < .05" = "#32CD32", "*p* < .01" = "#006400")
 
@@ -2254,9 +2268,9 @@ geom_ribbon(data = dfCI, aes(xmin = ll90_0, xmax = ul90_0, y = se.seq, fill = "n
           axis.title.x = ggtext::element_markdown(),
           legend.text = ggtext::element_markdown(),
           panel.grid = element_blank()))
-funnel_plots[domain]
 }
 
+funnel_plots
 
 
 ```
@@ -2265,65 +2279,248 @@ No evidence that effect size is associated with standard error - so that positiv
 
 ## 3 PSM
 
-Secondly, we used the 3-parameter selection model (3PSM) to directly estimate whether non-significant results have a lower chance of being published than significant findings. This cannot presently be extended to account for dependent effect sizes but sampling one effect size per sample results in a test that combines comparatively high power with a predictable Type I error rate. Therefore, we bootstrapped 3PSM with effect size sampling, and report the median results and distribution of 5,000 bootstrap resamples. Given that an alpha level of .05 is associated with a Type I error rate of up to 10%, we relied on this threshold (Rodgers & Pustejovsky, 2021). 
+Secondly, we planned to use the 3-parameter selection model (3PSM) to directly estimate whether non-significant results have a lower chance of being published than significant findings. However, this model assumes selection for direction *and* significance, which would be inappropriate for the current data where hypotheses point in varying directions. Consequently, we extended the model to estimate selection for both positive and negative significant results by including two cut-points.
 
-Roders & Pustejovsky (2023?) show that sampling leads to much lower Type I error rates than
-ignoring dependency or aggregating effects for 3PSM
+Selection models (of either type) cannot presently be extended to account for dependent effect sizes but sampling one effect size per sample results in a test that combines comparatively high power with a predictable Type I error rate. Therefore, we bootstrapped 3PSM with effect size sampling, and report the median results and distribution of 5,000 bootstrap resamples. Given that an alpha level of .05 is associated with a Type I error rate of up to 10%, we relied on this threshold (Rodgers & Pustejovsky, 2021). 
+
+Roders & Pustejovsky (2023?) show that sampling leads to much lower Type I error rates than ignoring dependency or aggregating effects for 3PSM
+
+Most recent (preliminary) results by Pustejovsky (2023 - https://www.jepusto.com/cluster-bootstrap-selection-model/) suggest that the cluster bootstraps (i.e. sampling at the study rather than the effect size level) may be the most accurate method for estimating selection models in the presence of dependent effects, so that we present this approach as supplementary.
+
 
 ```{r}
-
-# Define a function for 3PSM
-apply_3psm <- function(data) {
-    m.rma <- rma(yi = r_adj,        
-                sei = se_adj,
+# Define a function for the selection model
+apply_selmodel <- function(data, boot_method = c("within", "cluster")) {
+  if (boot_method == "within") {
+     data <- data %>% group_by(articlestudy) %>% sample_n(1) %>% ungroup() %>%   # Sample one effect size per study
+       sample_n(nrow(.), replace = TRUE) # Create bootstrap sample
+  } else if (boot_method == "cluster") {
+    data <- data %>% nest(.by = articlestudy, .key = "data") %>% sample_n(nrow(.), replace = TRUE) %>% unnest(data)
+  } else {
+    stop("Invalid boot_method")
+  }
+    run_selmodel <- function (data) {
+    # Fit the model
+    m.rma <- rma(yi = r_rep,        
+                sei = se,
                 data = data,
-                slab = authorstudy,
+                slab = articlestudy,
                 method = "REML",
                 test = "knha")
-    psm_mod <- selmodel(m.rma,
+    
+    selmodel(m.rma,
             type = "stepfun",
-            steps = 0.025,
-            alternative = "two.sided") # Selection for both positive and negative sig values  
-    # Creating a dataframe with required elements
-    df <- data.frame(
-        #TK - fix these once based on metafor model
-        SignificanceTest = m.selmodel$pval, 
-        EffectEstimateRatio = m.rma$beta / m.selmodel$beta,
-        CoefNonSig = ifelse(m.selmodel$pval > 0.05, m.selmodel$beta, NA)
+            skiphes = TRUE, skiphet = TRUE, # turn off SE and het-test calculations to accelerate,
+            steps = c(0.025, .975)) %>%  # Selection for both positive and negative sig values
+        summary()
+    
+    }
+    
+    run_selmodel <- purrr::possibly(run_selmodel, otherwise = NA)
+    
+    psm_mod <- run_selmodel(data)
+    
+    if (is.na(psm_mod[1])) {
+      return(tibble()) 
+    } else {
+
+    # Create dataframe with the required elements
+    tibble(
+        lrt = psm_mod$LRT, 
+        p_table = list(psm_mod$ptable %>% mutate(prob = psm_mod$delta))
     )
+    }
 }
 
 # Bootstrap sampling and applying 3PSM
 set.seed(123) # for reproducibility
-n_bootstraps <- 1000
-all_estimates <- numeric(n_bootstraps)
+n_bootstraps <- 100
 
-boot_res <- list()
-for (i in 1:n_bootstraps) {
-  # Sample one effect size per article/study group
-  boot_sample <- do.call("rbind", lapply(split(data, data$articlestudy), function(group) {
-    if (nrow(group) > 1) {
-      group[sample(nrow(group), 1), ]
-    } else {
-      group
-    }
-  }))
-  boot_res <- c(boot_res, apply_3psm(boot_sample))
-}
+handlers("cli")
 
-boot_res <- bind_rows(boot_res)
+plan(multisession, workers = 6)
+tic()
+with_progress({
+   p <- progressor(steps = n_bootstraps * 3, label = "Bootstrapping")
+sel_models_within <- map_dfr(datasets_pub, \(domain_data) {
+  future_map_dfr(seq_len(n_bootstraps) %>% set_names(), \(i) {
+    p()
+    apply_selmodel(domain_data, boot_method = "within")
+  }, .id = "run", .options = furrr_options(seed = TRUE))}, .id = "domain")  
+ })
+toc()
+
+
+tic()
+with_progress({
+   p <- progressor(steps = n_bootstraps * 3, label = "Bootstrapping")
+   sel_models_cluster <- map_dfr(datasets_pub, \(domain_data) {
+   future_map_dfr(seq_len(n_bootstraps) %>% set_names(), \(i) {
+     p()
+     apply_selmodel(domain_data, boot_method = "cluster")
+   }, .id = "run", .options = furrr_options(seed = TRUE))}, .id = "domain")  
+ })
+toc()
+
+tic()
+with_progress({
+   p <- progressor(steps = n_bootstraps * 3, label = "Bootstrapping")
+sel_models_within_focal <- map_dfr(datasets_pub_focal, \(domain_data) {
+  future_map_dfr(seq_len(n_bootstraps) %>% set_names(), \(i) {
+    p()
+    apply_selmodel(domain_data, boot_method = "within")
+  }, .id = "run", .options = furrr_options(seed = TRUE))}, .id = "domain")  
+ })
+toc()
+
+
+tic()
+with_progress({
+   p <- progressor(steps = n_bootstraps * 3, label = "Bootstrapping")
+   sel_models_cluster_focal <- map_dfr(datasets_pub_focal, \(domain_data) {
+   future_map_dfr(seq_len(n_bootstraps) %>% set_names(), \(i) {
+     p()
+     apply_selmodel(domain_data, boot_method = "cluster")
+   }, .id = "run", .options = furrr_options(seed = TRUE))}, .id = "domain")  
+ })
+toc()
+
+
+
+# Significance tests
+sel_models_within %>% 
+  group_by(domain) %>% 
+  summarise(ci_lower = quantile(lrt, .025),
+            ci_upper = quantile(lrt, .975),
+            lrt = median(lrt), 
+            .groups = "drop") %>% 
+  mutate(p = pchisq(lrt, df = 2, lower.tail = FALSE))
+
+
+
+
+
+sel_models_cluster %>% 
+  group_by(domain) %>% 
+  summarise(ci_lower = quantile(lrt, .025),
+            ci_upper = quantile(lrt, .975),
+            lrt = median(lrt), 
+            .groups = "drop") %>% 
+  mutate(p = pchisq(lrt, df = 2, lower.tail = FALSE))
+
+# Significance tests
 
 # Calculate median estimates
 # TK - do this once retun values are clear
 median_estimate <- median(all_estimates)
 
 # Visualization
-hist(all_estimates, main = "Distribution of 3PSM Estimates", xlab = "Estimate")
-abline(v = median_estimate, col = "red")
-
-
-
 ```
+
+
+```{r}
+# Visualisation derived from code by Cédric Scherer (https://gist.github.com/z3tt/8b2a06d05e8fae308abbf027ce357f01) - thanks!
+library(ggtext)
+library(colorspace)
+library(ragg)
+
+pal <- c("#A034F0", "#159090")
+
+dat <- sel_models_within %>%
+  mutate(method = "sampling") %>%
+  bind_rows(sel_models_cluster %>% mutate(method = "cluster")) %>%
+  mutate(hypotheses = "all") %>%
+  bind_rows(sel_models_cluster_focal %>% mutate(method = "cluster") %>% 
+              bind_rows(sel_models_within_focal %>% mutate(method = "sampling")) %>% mutate(hypotheses = "focal")) %>%
+  mutate(p_table = map(p_table, \(x) x %>% rownames_to_column("p_cat"))) %>%
+  unnest(p_table) %>%
+  mutate(p_cat = case_when(
+    p_cat == "0     < p <= 0.025" ~ "*p* < .05 (neg)",
+    p_cat == "0.025 < p <= 0.975" ~ "n.s.",
+    p_cat == "0.975 < p <= 1" ~ "*p* < .05 (pos)"
+  ) %>% factor()) %>%
+  filter(p_cat != "*p* < .05 (neg)")
+
+dat %>% 
+  group_by(hypotheses, domain, p_cat) %>% 
+  summarise(prob_median = median(prob), 
+            prob_mean = mean(prob),
+            prob_se = sd(prob),
+            ci_lower = quantile(prob, .025),
+            ci_upper = quantile(prob, .975),
+            .groups = "drop") %>% 
+  gt() %>% fmt_number(decimals = 3)
+
+dat %>%
+  ggplot(aes(x = fct_rev(p_cat), y = prob, color = method, fill = method), alpha = .5) +
+  facet_grid(~domain + hypotheses) +
+  ggdist::stat_halfeye(
+    aes(fill = after_scale(lighten(color, .5))),
+    adjust = .5,
+    width = .75,
+    .width = 0,
+    justification = -.4,
+    point_color = NA,
+    alpha = .7
+  ) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  stat_summary(
+    geom = "text",
+    fun = "median",
+    aes(
+      label = round(after_stat(y), 2),
+      color = method,
+      y = stage(prob, after_stat = 3.5 + as.numeric(color == "sampling") * .3),
+      color = after_scale(darken(color, .1, space = "HLS"))
+    ),
+    # family = "Roboto Mono",
+    fontface = "bold",
+    size = 3.3,
+    # size = 4,
+    #vjust = -4,
+    position = position_dodge(width = .5)
+  ) +
+  stat_summary(
+    geom = "point",
+    fun = "median",
+    aes(
+      label = round(after_stat(y), 2),
+      color = method,
+      color = after_scale(darken(color, .1, space = "HLS"))
+    ),
+    # family = "Roboto Mono",
+    shape = "—",
+    size = 4,
+    position = position_dodge(width = .5)
+  ) +
+  stat_summary(
+    fun.data = function(y) {
+      data.frame(
+        y = mean(y),
+        ymin = quantile(y, .025),
+        ymax = quantile(y, .975)
+      )
+    },
+    geom = "errorbar",
+    width = 0.2,
+    position = position_dodge(width = .5)
+  ) +
+  scale_color_manual(values = pal, guide = "none") +
+  scale_fill_manual(values = pal) +
+  labs(
+    x = "",
+    y = "**Publication odds**<br>(vs. *p* < .05 for negative results)",
+    title = "Publication bias as per selection models",
+    caption = "Results of 5,000 bootstrap resamples. Labeled midpoints represent medians, bars 95% CIs.",
+    fill = "Bootstrap method",
+  ) +
+  scale_y_continuous(limits = c(0, 5)) +
+  theme(axis.title.y = ggtext::element_markdown(),
+        axis.text.x = ggtext::element_markdown(),
+          legend.text = ggtext::element_markdown(),
+          panel.grid = element_blank())
+```
+
 
 
 # Stat checks
@@ -2332,7 +2529,6 @@ abline(v = median_estimate, col = "red")
 
 ```{r}
 # Add trailing 0s manually
-
 
 #TK test whether trailing 0 are maintained if entered, then fix prec here
 GRIMMER_div <- dataset %>% filter(!is.na(M_div)) %>% select(ID, `N teams`, Items_div:Notes_div) %>% 
@@ -2362,7 +2558,19 @@ GRIMMER_perf <- dataset %>% filter(!is.na(M_perf)) %>% select(ID, `N teams`, Ite
 ## Statcheck
 
 ```{r}
-# Note: Replace 'dummy_statcheck_function' with actual statcheck function
+# Retrieve relevant FTs
+available <- list.files("../SM1 - Search and deduplication/full_text", full.names = TRUE, recursive = TRUE, pattern = ".pdf") 
+
+pdfs$path <- available[map_int(pdfs$file_name, \(f) str_detect(available, f) %>% which() %>% c(NA) %>% .[1])]
+
+missing_pdfs <- pdfs %>% filter(is.na(path)) %>% left_join(dataset %>% select(id, file), by = "id", multiple = "first") 
+
+walk(pdfs %>% filter(!is.na(path)) %>% pull(path), 
+     ~file.rename(.x, file.path("../SM1 - Search and deduplication/full_text/included", basename(.x))))
+
+
+
+
 run_statcheck <- function(filename) {
   file_path <- file.path("full_text", filename)
   pdf_text <- pdftools::pdf_text(file_path) |>
@@ -2377,6 +2585,7 @@ run_statcheck <- function(filename) {
     return(any(statcheck_result$error))
   }
 }
+
  Initialize or read existing statcheck results
 if(file.exists("statcheck_results.csv")) {
   statcheck_results <- read.csv("statcheck_results.csv")
@@ -2405,8 +2614,3 @@ dataset <- dataset %>%
   left_join(final_statcheck_results, by = "ID")
 
 ```
-
-
-## Retractions
-
-
