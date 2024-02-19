@@ -2528,89 +2528,275 @@ dat %>%
 ## GRIM and GRIMMER
 
 ```{r}
-# Add trailing 0s manually
 
-#TK test whether trailing 0 are maintained if entered, then fix prec here
-GRIMMER_div <- dataset %>% filter(!is.na(M_div)) %>% select(ID, `N teams`, Items_div:Notes_div) %>% 
-  mutate(N = ifelse(!is.na(Notes_div) & str_detect(Notes_div, "N = "), str_extract(Notes_div, "\\d+") %>% as.numeric(), `N teams` %>% as.numeric()),
-         across(Items_div:SD_div, as.numeric)) %>% 
+# Means are imported as character so that trailing 0s can be accounted for - therefore,
+# we use this wrapper function to convert to numeric and account for trailing 0s
+
+GRIM_test_wrapper <- function(mean_char, n_obs, n_items = 1, return_values = FALSE) {
+  # Convert mean from character to numeric
+  mean_num <- as.numeric(mean_char)
+  
+  # Determine the precision of the mean based on the input string
+  decimal_position <- regexpr("\\.", mean_char)
+  if (decimal_position == -1) {
+    m_prec <- 0
+  } else {
+    m_prec <- nchar(substring(mean_char, decimal_position + 1))
+  }
+  
+  # Call the original GRIM_test function with calculated precision
+  GRIM_test(mean = mean_num, n_obs = n_obs, m_prec = m_prec, n_items = n_items, return_values = return_values)
+}
+
+GRIMMER_test_wrapper <- function(mean_char, sd_char, n_obs, n_items = 1) {
+  # Convert mean from character to numeric
+  mean_num <- as.numeric(mean_char)
+  sd_num <- as.numeric(sd_char)
+  
+  # Determine the precision of the mean based on the input string
+  decimal_position <- regexpr("\\.", mean_char)
+  if (decimal_position == -1) {
+    m_prec <- 0
+  } else {
+    m_prec <- nchar(substring(mean_char, decimal_position + 1))
+  }
+  decimal_position <- regexpr("\\.", sd_char)
+  if (decimal_position == -1) {
+    sd_prec <- 0
+  } else {
+    sd_prec <- nchar(substring(sd_char, decimal_position + 1))
+  }
+  
+  # Call the original GRIM_test function with calculated precision
+  GRIMMER_test(mean = mean_num, sd = sd_num, n_obs = n_obs, m_prec = m_prec, sd_prec = sd_prec, n_items = n_items)
+}
+
+GRIM_div_concerns <- dataset %>% filter(!is.na(m_div)) %>% 
+  mutate(N = ifelse(!is.na(notes_div) & str_detect(notes_div, "N = "), str_extract(notes_div, "\\d+") %>% as.numeric(), n_teams_coded)) %>% 
   rowwise() %>% 
-  mutate(GRIM = GRIM_test(M_div, N, n_items = Items_div),
-         GRIMMER_std = if (GRIM) GRIMMER_test(M_div, SD_div, N, n_items = Items_div) else FALSE,
-         # min_val and max_val are guessed with a simple heuristic - needs further investigation if they fail
-         GRIMMER_minmax = if (GRIMMER_std) GRIMMER_test(M_div, SD_div, N, n_items = Items_div, min_val = 1, max_val = Options_div) else FALSE)
+  mutate(GRIM = GRIM_test_wrapper(m_div, N, n_items = items_div, return_values = FALSE),
+         GRIMMER = GRIMMER_test_wrapper(m_div, sd_div, N, items_div)) %>% 
+  filter(!GRIMMER)
 
-GRIMMER_perf <- dataset %>% filter(!is.na(M_perf)) %>% select(ID, `N teams`, Items_perf:Notes_perf) %>% 
-  mutate(N = ifelse(!is.na(Notes_perf) & str_detect(Notes_perf, "N = "), str_extract(Notes_perf, "\\d+") %>% as.numeric(), `N teams` %>% as.numeric()),
-         across(Items_perf:SD_perf, as.numeric)) %>% 
+GRIM_perf_concerns <- dataset %>% filter(!is.na(m_perf)) %>% 
+  mutate(N = ifelse(!is.na(notes_perf) & str_detect(notes_perf, "N = "), str_extract(notes_perf, "\\d+") %>% as.numeric(), n_teams_coded)) %>% 
   rowwise() %>% 
-  mutate(GRIM = GRIM_test(M_perf, N, n_items = Items_perf),
-         GRIMMER_std = if (GRIM) GRIMMER_test(M_perf, SD_perf, N, n_items = Items_perf) else FALSE)
+  mutate(GRIM = GRIM_test_wrapper(m_perf, N, n_items = items_perf, return_values = FALSE),
+         GRIMMER = GRIMMER_test_wrapper(m_perf, sd_perf, N, items_perf)) %>% 
+  filter(!GRIMMER)
 
-,
-         # min_val and max_val are guessed with a simple heuristic - needs further investigation if they fail
-         GRIMMER_minmax = if (GRIMMER_std) GRIMMER_test(M_perf, SD_perf, N, n_items = Items_perf, min_val = 1, max_val = Options_perf) else FALSE)
+GRIM_div_concerns %>% transmute(id, diversity = paste(domain, sub_dom, div_specific), m_div, N, items_div, GRIM)
+GRIM_perf_concerns %>% transmute(id, performance = paste(name_perf, rater), m_perf, N, items_perf, GRIM)
 
-
+GRIM_flagged_reviewed <- c("10.1348/096317905x72128", "10.1111/joop.12303")
 
 ```
+
+Investigation of individual concerns:
+- 10.1108/jmp-01-2012-0020: Reports impossible mean (2.47) for functional diversity *if* this was based on the full sample (N = 48). It could be limited to the sample where manager ratings are available (N = 36), but that is not indicated in the reporting.
+- 10.1111/joop.12303: Performance ratings inconsistent with our interpretation of the measure (as single-item). Likely three items, but that is not clearly indicated, and no reliability is reported.
 
 ## Statcheck
 
 ```{r}
+
+extract_pdfminer <- function(path) {
+  # Import Python module
+  pdfminer <- import("pdfminer.high_level")
+  
+  # Call Python function to extract text
+  text <- pdfminer$extract_text(path)
+  
+  # Return the extracted text
+  return(text)
+}
+
+extract_pdfminer("../SM1 - Search and deduplication/full_text/included//10.1177--1368430212437798.pdf") %>% str_squish() %>% clipr::write_clip()
+
 # Retrieve relevant FTs
-available <- list.files("../SM1 - Search and deduplication/full_text", full.names = TRUE, recursive = TRUE, pattern = ".pdf") 
+full_texts <- list.files("../SM1 - Search and deduplication/full_text/included/", full.names = TRUE, recursive = TRUE, pattern = ".pdf")
 
-pdfs$path <- available[map_int(pdfs$file_name, \(f) str_detect(available, f) %>% which() %>% c(NA) %>% .[1])]
+pdfs$path <- full_texts[map_int(pdfs$file_name, \(f) str_detect(full_texts, fixed(f)) %>% which() %>% c(NA) %>% .[1])]
 
-missing_pdfs <- pdfs %>% filter(is.na(path)) %>% left_join(dataset %>% select(id, file), by = "id", multiple = "first") 
+# Two PDFs missing - here authors of conference papers provided brief excerpts only
+# pdfs %>% filter(is.na(path)) %>% left_join(dataset %>% select(id, file), by = "id", multiple = "first") 
 
-walk(pdfs %>% filter(!is.na(path)) %>% pull(path), 
-     ~file.rename(.x, file.path("../SM1 - Search and deduplication/full_text/included", basename(.x))))
+run_statcheck <- function(file_path, pdf_engine = c("default", "pdftools", "all"), ocr_failures = TRUE, suppress_ocrmypdf = FALSE) {
+  if(!file.exists(file_path)) {
+    warning("File does not exist: ", file_path)
+    return(NA)
+  }
+  
+  statcheck_result <- list()
+  
+  if (pdf_engine[1] %in% c("pdftools", "all")) {
+  pdf_text <- pdftools::pdf_text(file_path) %>% 
+              paste(collapse = "") %>% 
+              str_squish() %>%
+    str_remove_all('-(?=\\s*\\d)') # remove space between - and a number
+  
+  statcheck_result["pdftools"] <- list(possibly(statcheck::statcheck, otherwise = NULL)(pdf_text, pZeroError = FALSE, OneTailedTxt = TRUE, messages = FALSE))
 
+  } 
+  
+  if (pdf_engine[1] %in% c("default", "all")) {
+    statcheck_result["default"] <- list(possibly(statcheck::checkPDF, otherwise = NULL)(file_path, pZeroError = FALSE, OneTailedTxt = TRUE, messages = FALSE))
+  }
+  
+  if ((is.null(statcheck_result) && ocr_failures == TRUE)|| pdf_engine[1] %in% c("all")) {
+    #message("Attempting OCR ...")
+    if (suppress_ocrmypdf == TRUE) {
+if (.Platform$OS.type == "windows") {
+  redirect <- " >NUL 2>&1"
+} else {
+  redirect <- " >/dev/null 2>&1"
+}
+    } else {
+      redirect <- ""
+    }
+    
+    temp <- tempfile(fileext = ".pdf")
+    system(sprintf('ocrmypdf --force-ocr --quiet %s %s %s', 
+                   shQuote(file_path),
+                   shQuote(temp),
+                   redirect))
+    statcheck_result["ocr"] <- list(possibly(statcheck::checkPDF, otherwise = NULL)(temp, pZeroError = FALSE, OneTailedTxt = TRUE, messages = FALSE))
 
-
-
-run_statcheck <- function(filename) {
-  file_path <- file.path("full_text", filename)
-  pdf_text <- pdftools::pdf_text(file_path) |>
-              paste(collapse = "") |>
-              gsub("\n", "", .)
-
-  statcheck_result <- statcheck::statcheck(pdf_text, pZeroError = FALSE, OneTailedTxt = TRUE)
-
+    if(!is.null(statcheck_result[["ocr"]])) {
+      #message("OCR improved ", basename(file_path))
+    } else {
+      #message("OCR did not change ", basename(file_path))
+    }
+  }
+  
   if (is.null(statcheck_result)) {
     return(NA)
   } else {
-    return(any(statcheck_result$error))
+    return(statcheck_result)
   }
 }
 
- Initialize or read existing statcheck results
-if(file.exists("statcheck_results.csv")) {
-  statcheck_results <- read.csv("statcheck_results.csv")
-} else {
-  statcheck_results <- data.frame(ID = character(), filename = character(), statcheck_issue = logical())
+
+
+# Run as background job
+# Does not return data, but saves it to disk
+job::job({
+plan(multisession, workers = 4)
+with_progress({
+  p <- progressor(steps = nrow(pdfs))
+  
+  # Create a directory for the intermittent results if it doesn't exist
+  results_dir <- "data/statcheck_results"
+  if (!dir.exists(results_dir)) dir.create(results_dir)
+  
+  statcheck_results <- future_walk2(pdfs$path, pdfs$file_name, \(f, id) {
+    result_file <- file.path(results_dir, paste0(id, ".rds"))
+    # Check if the result for this file already exists to skip processing
+    if (!file.exists(result_file)) {
+      result <- possibly(run_statcheck, otherwise = NULL)(f, pdf_engine = "all", suppress_ocrmypdf = FALSE)
+      if (is.null(result)) {
+        browser()
+      }
+      # Save the result to disk
+      saveRDS(result, result_file)
+      t <- try(readRDS(result_file))
+if(class(t) == "try-error") {
+    browser()
 }
+    }
+    
+    p() # Update progress
+    #result
+  })
+})},
+title = "Run statcheck with multiple extraction options"
+)
 
-# Assuming 'ID' is a column in your dataset
-# Filter out IDs already processed
-dataset_filtered <- dataset %>%
-  filter(!ID %in% statcheck_results$ID)
+# Read the results from disk
+results_dir <- "data/statcheck_results"
+statcheck_results <- map2(pdfs$id, pdfs$file_name, \(id, f) {
+    dat <- possibly(read_rds, otherwise = tibble(status = "RDS failed", id = id))(file.path(results_dir, paste0(f, ".rds"))) 
+    if (!is_tibble(dat)) {
+     
+  dat <- dat %>% 
+    map_dfr(\(x) if(is.null(x)) {
+      tibble(status = "failed")
+    }  else if (length(x) == 1 && is.na(x)) {
+              tibble(status = "no results found")
+      } else if (!(is.data.frame(x))) {
+        tibble(status = "invalid file type") # should never get here
+      } else {
+        x %>% mutate(status = "succeeded")
+        }, .id = "method") %>% 
+    mutate(id = id)
+}
+    dat}
+    ) %>% bind_rows() 
 
-# Run statcheck for unique files in the filtered dataset
-new_statcheck_results <- unique(dataset_filtered$filename) %>%
-  setNames(nm = .) %>%
-  map_df(~data.frame(ID = dataset_filtered$ID[dataset_filtered$filename == .x],
-                     filename = .x, 
-                     statcheck_issue = run_statcheck(.x)))
+statcheck_results %>% 
+  group_by(method, status, id) %>% 
+  summarise(n_res = ifelse(status[1] == "succeeded", n(), 0), .groups = "drop_last") %>%
+  filter(status == "RDS failed") %>% pull(id)
 
-# Append new results to existing statcheck results and save
-final_statcheck_results <- bind_rows(statcheck_results, new_statcheck_results)
-write.csv(final_statcheck_results, "statcheck_results.csv", row.names = FALSE)
+statcheck_results %>% 
+  group_by(method, status, id) %>% 
+  summarise(n_res = ifelse(status[1] == "succeeded", n(), 0), .groups = "drop_last") %>%
+  summarise(n = n(), mean_res = mean(n_res), median_res = median(n_res), .groups = "drop") %>% 
+  filter(status == "succeeded") %>% 
+  mutate(success_rate = n / nrow(pdfs))
+ 
+statcheck_merged <- statcheck_results %>%
+  filter(status == "succeeded") %>% 
+  select(-source, -status, -apa_factor) %>% 
+  distinct() %>% 
+  mutate(value = TRUE) %>%
+  pivot_wider(names_from = method, values_from = value, values_fill = FALSE) %>% 
+  group_by(across(-c(pdftools:default))) %>% 
+  summarise(across(pdftools:default, any), .groups = 'drop')
 
-# Merge the statcheck results with the original dataset
-dataset <- dataset %>%
-  left_join(final_statcheck_results, by = "ID")
+# Before reporting on parsing methods, would need to improve merging (e.g., with spaces or different dashes)
+statcheck_merged %>% count(across(pdftools:default)) %>% 
+  mutate(hits = pdftools + ocr + default) %>% arrange(-hits) %>% 
+  select(hits, everything())
+
+statcheck_merged %>% filter(decision_error)
+statcheck_merged %>% filter(error, !decision_error) %>% mutate(computed_p = round(computed_p, 3))
+
+statcheck_flagged_reviewed <- c("10.1037/1089-2699.5.2.111", "10.1080/00140139.2013.875597", "10.1109/tem.2011.2166078", "10.1177/1368430212437798", "10.1287/orsc.2013.0878", "21073", "38862", "10.1002/hrm.21658", "10.1002/job.1777", "10.1016/j.jbusres.2018.11.029", "10.1016/j.obhdp.2013.04.003", "10.1037/1089-2699.12.4.307", "10.1037/a0025583", "10.1109/ieem.2013.6962412", "10.1177/1046496418796281", "10.1348/096317905x72128", "10.2139/ssrn.2929009", "31242", "34459", "41373", "9990")
+
 
 ```
+
+Reviewed decision errors:
+- 10.1037/1089-2699.5.2.111: x(3, N = 321) = 63.44, p >.1 *inconsistent*
+- 10.1080/00140139.2013.875597: parse errors, Chi2 should be t, BUT flagged F tests inconsistent with ps 
+- 10.1109/tem.2011.2166078: flagged chi-sq plus the third reported all appear inconsistent
+- OK: 10.1177/00187208211048301: one-tailed test, reported but too far for statcheck to catch automatically
+- 10.1177/1368430212437798: Sobel's test using z, so possibly some flexibility - but can't see how that p-value could be achieved (and 5 other reporting errors without decision errors)
+- 10.1287/orsc.2013.0878: maybe have used one-tailed tests for Sobel's test without reporting that - inconsistent as it stands (and again for test interpreted as showing marginal significance)
+- OK: 10.1287/orsc.2021.1448: parse error, Chi2 should be t, then consistent
+- OK: 10.1287/orsc.2021.1560: parse error, Chi2 should be t, then consistent
+- 21073: flagged F-test inconsistent - as is a previous one claimed to be significant at 10% level
+- 38862: inconsistent F-tests
+- OK: bw_15842: parse error, Chi2 should be t, then consistent
+
+
+Reviewed other errors:
+- 10.1002/hrm.21658	- inconsistent, conservative
+- 10.1002/job.1777	- inconsistent, conservative
+- 10.1016/j.jbusres.2018.11.029	- inconsistent, conservative
+- 10.1016/j.obhdp.2013.04.003	- inconsistent
+- 10.1037/1089-2699.12.4.307	- inconsistent
+- 10.1037/a0025583	- inconsistent
+- OK 10.1097/HMR.0000000000000369 - p reported as < .00, which is impossible, but p is indeed tiny, so accepted
+- 10.1109/ieem.2013.6962412 - appears to have used one-tailed p-values without reporting that
+- OK 10.1109/ieem.2014.7058744	- parsing error because , instead of . was used for decimals
+- 10.1177/1046496418796281: inconsistent, conservative
+- 10.1348/096317905x72128	- inconsistent, very minor (and again many instances of p < .00 that would be ok on their own)
+- 10.2139/ssrn.2929009	- inconsistent, wrong band (i.e. not < .01)
+- 31242 - inconsistent, conservative
+- OK 33800, issue is only < .00 (plus one , vs . parsing error)
+- 34459 - inconsistent, though only = .001 instead of < .001
+- 41373 - inconsistent, though only < .004 instead of = .004
+- 9990 - inconsistent, minor
+
